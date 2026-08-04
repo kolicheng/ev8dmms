@@ -1,615 +1,453 @@
 ﻿#NoEnv
-#SingleInstance, Force  ; 確保只有一個執行實例
+#SingleInstance, Force
 SetWorkingDir %A_ScriptDir%
 
-; --- 系統設定檔路徑 ---
-IniFile := "config.ini"
-TmplFile := "templates.ini"
-LogFile := "sms_log.txt"
+; ==============================================================================
+; 程式名稱：EVERY8D 簡訊發送工具
+; 程式功能：透過 EVERY8D API 發送簡訊、預約發送、管理簡訊範本、檢視本地發送紀錄。
+; 儲存機制：採用 Windows 登錄檔 (HKCU) 儲存帳密與範本，利用 Windows 原生使用者帳戶
+;           隔離機制確保安全性，達到「零外部設定檔」的極簡化。
+; ==============================================================================
 
-; --- 初始化：帳戶驗證與加密儲存 ---
+; --- 定義系統全域變數 ---
+; RegPath: 儲存 EVERY8D 帳號密碼的登錄檔主機碼路徑
+Global RegPath := "HKCU\Software\Every8DSMSTool"
+; TmplRegPath: 儲存所有自訂簡訊範本的子機碼路徑
+Global TmplRegPath := "HKCU\Software\Every8DSMSTool\Templates"
+; LogFile: 本地發送紀錄檔名稱 (與主程式放在同一個資料夾)
+Global LogFile := "sms_log.txt"
+; Templates: 程式執行期間，存放在記憶體中的範本關聯陣列 (Dictionary)
+Global Templates := {}
+
+; ==============================================================================
+; 1. 初始化：載入範本、帳號認證與預約時間預設值
+; ==============================================================================
 InitAuth:
-    if (!FileExist(IniFile)) {
-        ; 首次執行，要求輸入帳密
-        InputBox, SavedUID, 初始設定, 請輸入您的帳號 (UID):,, 200, 130
-        if (ErrorLevel || SavedUID="")
-            ExitApp
-        InputBox, SavedPWD, 初始設定, 請輸入您的密碼 (PWD):,, 200, 130, Hide
-        if (ErrorLevel || SavedPWD="")
-            ExitApp
+; --- 載入登錄檔中的範本 ---
+; 透過 GoSub 跳轉執行 LoadTemplates 標籤區塊，將登錄檔範本讀入 Templates 陣列
+GoSub, LoadTemplates
 
-        ; 將明文帳密加密後寫入設定檔，並設為隱藏屬性
-        EncUID := Encrypt(SavedUID)
-        EncPWD := Encrypt(SavedPWD)
+; --- 讀取登錄檔帳密 ---
+RegRead, SavedUID, %RegPath%, UID
+RegRead, SavedPWD, %RegPath%, PWD
 
-        IniWrite, %EncUID%, %IniFile%, Credentials, UID
-        IniWrite, %EncPWD%, %IniFile%, Credentials, PWD
-        FileSetAttrib, +H, %IniFile%
-    } else {
-        ; 讀取加密的帳密資料
-        IniRead, EncUID, %IniFile%, Credentials, UID, % ""
-        IniRead, EncPWD, %IniFile%, Credentials, PWD, % ""
+; 清除可能存在的頭尾空白字元
+SavedUID := Trim(SavedUID)
+SavedPWD := Trim(SavedPWD)
 
-        ; 解密為明文供 API 呼叫使用
-        SavedUID := Decrypt(EncUID)
-        SavedPWD := Decrypt(EncPWD)
+; 若登錄檔中找不到紀錄 (首次執行或已被重置)，則跳出輸入框要求使用者設定
+if (SavedUID = "" || SavedPWD = "") {
+    InputBox, SavedUID, 初始帳號設定, 請輸入您的 EVERY8D 帳號 (UID):,, 280, 130
+    if (ErrorLevel || SavedUID = "")
+        ExitApp ; 使用者按取消或未輸入則直接結束程式
+        
+    InputBox, SavedPWD, 初始密碼設定, 請輸入您的 EVERY8D 密碼 (PWD):,, 280, 130, Hide
+    if (ErrorLevel || SavedPWD = "")
+        ExitApp ; 使用者按取消或未輸入則直接結束程式
+    
+    ; 將輸入的帳密寫入登錄檔保存，供下次啟動直接讀取
+    RegWrite, REG_SZ, %RegPath%, UID, %SavedUID%
+    RegWrite, REG_SZ, %RegPath%, PWD, %SavedPWD%
+}
 
-        ; 防錯/防篡改機制：若解密失敗 (回傳空值)，則刪除損毀的設定檔並要求重設
-        if (SavedUID = "" || SavedPWD = "") {
-            MsgBox, 48, 錯誤, 本地密碼檔解密失敗或已損毀，將為您重置設定。
-            FileSetAttrib, -H, %IniFile%
-            FileDelete, %IniFile%
-            Goto, InitAuth
-        }
-    }
+; --- 計算預設預約時間 (預設為：開啟軟體當下的 10 分鐘後) ---
+FutureTime := A_Now
+EnvAdd, FutureTime, 10, Minutes ; 增加 10 分鐘
+FormatTime, DefDate, %FutureTime%, yyyyMMdd ; 格式化為 20231231
+FormatTime, DefHour, %FutureTime%, HH       ; 格式化為 24 小時制的時
+FormatTime, DefMin, %FutureTime%, mm        ; 格式化為分
 
-    ; --- UI 佈局全域變數 ---
-    Global MSG_Y := 168       ; 簡訊內容框起始 Y 軸
-    Global MSG_MinH := 100    ; 簡訊內容框最低高度
-    Global MSG_MaxH := 220    ; 簡訊內容框最高高度
-    Global Current_MSG_H := 100
-    Global HwndGui1           ; 主視窗控制代碼 (Hwnd)
+; 動態產生下拉選單的時間選項 (利用迴圈產生 00~23 時 / 00~59 分)
+HourOptions := ""
+Loop, 24 {
+    h := Format("{:02d}", A_Index - 1)
+    ; 若符合預設時間，加上 "||" 讓其成為下拉選單的預設選項
+    HourOptions .= h . (h == DefHour ? "||" : "|")
+}
+MinOptions := ""
+Loop, 60 {
+    m := Format("{:02d}", A_Index - 1)
+    MinOptions .= m . (m == DefMin ? "||" : "|")
+}
 
-    ; --- 建立主視窗 (Gui 1) ---
-    Gui, 1:New, +HwndHwndGui1
-    Gui, 1:Default
-    Gui, 1:Font, s10 Bold, Microsoft JhengHei
-    Gui, 1:Add, Text, x20 y18 w240 cNavy, 👤 目前帳號: %SavedUID%
-    Gui, 1:Font, s10 Norm, Microsoft JhengHei
-    Gui, 1:Add, Button, gResetAuth x270 y14 w110 h26, 🔑 重置帳密
+; ==============================================================================
+; 主介面 (GUI 1) 建構與排版
+; ==============================================================================
+Gui, 1:Default
+Gui, 1:Font, s10, Microsoft JhengHei ; 設定預設字型為微軟正黑體，大小 10
 
-    ; 手機號碼標題與查詢餘額按鈕
-    Gui, 1:Add, Text, x20 y48 w240, 📱 手機號碼 (多組請以逗號隔開):
-    Gui, 1:Add, Button, gCheckCredit x270 y44 w110 h26, 💰 查詢餘額
-    Gui, 1:Add, Edit, vDEST x20 y74 w360 h28, 0900000000
+; --- 帳戶狀態區 ---
+Gui, 1:Add, GroupBox, x15 y10 w450 h70, 帳號登入狀態
+Gui, 1:Add, Text, x30 y38, 當前帳號：
+Gui, 1:Add, Text, x100 y38 w130 vUIDDisplay c0x0055AA, %SavedUID% ; 藍字顯示帳號
+Gui, 1:Add, Button, x240 y32 w95 h30 gCheckCredit, 💰 查詢餘額
+Gui, 1:Add, Button, x345 y32 w110 h30 gResetAuth, 🔑 重置帳密
 
-    ; =========================================
-    ; 預約發送設定區 (加寬版下拉選單)
-    ; =========================================
-    ; 預先產生時與分的下拉選單資料 (自動預設為現在時間)
-    HourList := ""
-    Loop, 24 {
-        h := Format("{:02}", A_Index - 1)
-        HourList .= h . (h == A_Hour ? "||" : "|")
-    }
-    MinList := ""
-    Loop, 60 {
-        m := Format("{:02}", A_Index - 1)
-        MinList .= m . (m == A_Min ? "||" : "|")
-    }
+; --- 發送對象設定區 ---
+Gui, 1:Add, Text, x15 y95, 📱 手機號碼 (多筆請用半形逗號隔開)：
+Gui, 1:Add, Edit, x15 y115 w450 vDEST, 0900000000
 
-    Gui, 1:Add, CheckBox, vUseSched gToggleSched x20 y112 h20, 📅 啟用預約發送
-    Gui, 1:Add, DateTime, vSchedDate w115 h28 x140 yp-4 Disabled Choose%A_Now%, yyyy-MM-dd
-    Gui, 1:Add, DropDownList, vSchedHour w55 r12 x+8 yp Disabled, %HourList%
-    Gui, 1:Add, Text, x+4 yp+4, :
-    Gui, 1:Add, DropDownList, vSchedMin w55 r15 x+4 yp-4 Disabled, %MinList%
-    ; =========================================
+; --- 預約發送設定區 ---
+; Checkbox 綁定 gToggleSched，勾選狀態改變時動態啟用/停用右側時間元件
+Gui, 1:Add, Checkbox, x15 y152 w135 vUseSched gToggleSched, ⏰ 啟用預約發送
+Gui, 1:Add, DateTime, x150 y149 w120 vSchedDate Disabled Choose%DefDate%, yyyy/MM/dd
+Gui, 1:Add, DropDownList, x290 y149 w45 vSchedHour Disabled, %HourOptions%
+Gui, 1:Add, Text, x340 y152, 時
+Gui, 1:Add, DropDownList, x365 y149 w45 vSchedMin Disabled, %MinOptions%
+Gui, 1:Add, Text, x415 y152, 分
 
-    Gui, 1:Add, Text, x20 y145 w360, 💬 簡訊內容:
-    ; 綁定 gCountChars 進行字數統計與高度自適應 (+VScroll 避免多行溢出截斷)
-    Gui, 1:Add, Edit, vMSG x20 y168 w360 h100 gCountChars +Multi +WantReturn +VScroll
+; --- 簡訊範本選擇區 ---
+Gui, 1:Add, Text, x15 y185, 📋 選擇簡訊範本：
+TmplOptions := "|-- 請選擇內建範本 --||"
+for title, content in Templates {
+    TmplOptions .= title . "|" ; 組合範本名稱進入下拉選單
+}
+Gui, 1:Add, DropDownList, x15 y205 w320 vTmplSelect gOnTmplSelect, %TmplOptions%
+Gui, 1:Add, Button, x345 y203 w120 h28 gOpenTmplMgr, ⚙️ 範本管理
 
-    ; 下方控制項 (綁定 HWND 供動態排版使用)
-    Gui, 1:Add, Text, x20 vCharCount cGreen w360 y276 hwndHwndCharCount, 字數: 0 (共 0 封簡訊)
-    Gui, 1:Add, Text, x20 y300 w360 hwndHwndTplLabel, 快速選取範本:
-    Gui, 1:Add, DropDownList, vTemplateList w250 gApplyTemplate x20 y323 hwndHwndTplList, % GetTemplates()
-    Gui, 1:Add, Button, gOpenTemplateManager w100 h28 x+10 yp-1 hwndHwndMgrBtn, ⚙ 管理範本
+; --- 簡訊內容編輯與字數統計區 ---
+Gui, 1:Add, Text, x15 y240, 💬 簡訊內容：
+Gui, 1:Add, Edit, x15 y265 w450 h110 vMSG gUpdateCharCount, 
+Gui, 1:Add, Text, x15 y380 w450 vCharCountText c0x007ACC, 字數：0 字 (共 0 封簡訊)
 
-    Gui, 1:Font, s11 Bold, Microsoft JhengHei
-    Gui, 1:Add, Button, gSendSMS w360 h50 x20 y363 hwndHwndSendBtn, ✉ 發送簡訊
-    Gui, 1:Font
+; --- 核心控制按鈕 ---
+Gui, 1:Add, Button, x15 y415 w215 h40 gSendSMS Default, 🚀 發送簡訊
+Gui, 1:Add, Button, x250 y415 w215 h40 gShowLogWindow, 📜 檢視紀錄
 
-    ; 底部按鈕區 (檢視紀錄與關閉視窗)
-    Gui, 1:Font, s10, Microsoft JhengHei
-    Gui, 1:Add, Button, gOpenLog w175 h35 x20 y423 hwndHwndLogBtn, 📜 檢視紀錄
-    Gui, 1:Add, Button, gCloseApp w175 h35 x205 y423 hwndHwndCloseBtn, ❌ 關閉視窗
-
-    ; 視窗總寬度 400px，明確指定初始 Client 高度 h478 避免底端按鈕遭裁切
-    Gui, 1:Show, w400 h478, 發簡訊 v5.4
+; 顯示主視窗
+Gui, 1:Show, w480 h470, EVERY8D簡訊發送
+GoSub, UpdateCharCount ; 啟動時先算一次字數 (預設為 0)
 return
 
-; --- UI 事件：查詢 API 點數餘額 ---
-CheckCredit:
-    URL := "https://new.e8d.tw/API21/HTTP/GetCredit.ashx"
-    PostData := "UID=" . SavedUID . "&PWD=" . SavedPWD
-
-    whr := ComObjCreate("WinHttp.WinHttpRequest.5.1")
-    whr.Open("POST", URL, true)
-    whr.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded")
-
-    try {
-        whr.Send(PostData)
-        whr.WaitForResponse()
-        Result := Trim(whr.ResponseText)
-
-        ; 判斷是否為負數錯誤碼
-        if (SubStr(Result, 1, 1) = "-") {
-            Reason := GetErrorReason(Result)
-            MsgBox, 48, 餘額查詢失敗, 查詢失敗！`n`n錯誤碼：%Result%`n原因：%Reason%
-
-            ; 若因帳密錯誤導致查詢失敗，一樣主動提示重置
-            if (Result = "-2") {
-                MsgBox, 52, 帳密錯誤, 系統偵測到您的 API 帳號或密碼發生錯誤。`n請問是否要清除記錄並重新設定？
-                IfMsgBox, Yes
-                {
-                    FileSetAttrib, -H, %IniFile%
-                    FileDelete, %IniFile%
-                    Reload
-                }
-            }
-        } else {
-            MsgBox, 64, 帳戶餘額, 🟢 您目前的帳戶餘額為：`n`n%Result% 點
-        }
-    } catch e {
-        MsgBox, 16, 錯誤, 連線至 API 失敗，請檢查網路連線。
-    }
+; ==============================================================================
+; 範本讀取與介面更新邏輯
+; ==============================================================================
+LoadTemplates:
+Templates := {} ; 清空當前陣列
+; 透過 Loop, Reg 遍歷登錄檔中的所有範本 (鍵名=標題, 鍵值=內容)
+Loop, Reg, %TmplRegPath%, V
+{
+    RegRead, tmplContent
+    if (!ErrorLevel)
+        Templates[A_LoopRegName] := tmplContent
+}
 return
 
-; --- UI 事件：切換預約發送 ---
+RefreshTmplDDL:
+; 用於管理介面新增/刪除範本後，同步更新主視窗的下拉選單
+TmplOptions := "|-- 請選擇內建範本 --||"
+for title, content in Templates {
+    TmplOptions .= title . "|"
+}
+GuiControl, 1:, TmplSelect, %TmplOptions%
+return
+
+; ==============================================================================
+; 觸發事件處理：範本選擇、字數精準計算、預約狀態切換
+; ==============================================================================
+OnTmplSelect:
+Gui, 1:Submit, NoHide
+; 確保選中的不是預設提示字元，並自動將對應的內容帶入文字框
+if (TmplSelect != "" && TmplSelect != "-- 請選擇內建範本 --" && Templates.HasKey(TmplSelect)) {
+    GuiControl, 1:, MSG, % Templates[TmplSelect]
+    GoSub, UpdateCharCount ; 帶入後自動重算字數
+}
+return
+
+UpdateCharCount:
+Gui, 1:Submit, NoHide
+len := StrLen(MSG) ; 計算字元長度 (AHK 預設以 UTF-16 處理，中文英文皆算 1 個長度)
+if (len == 0) {
+    GuiControl, 1:+c007ACC, CharCountText ; 恢復預設藍色
+    GuiControl, 1:, CharCountText, % "字數：0 字 (共 0 封簡訊)"
+} else if (len <= 70) {
+    ; 單則簡訊標準限制為 70 個字 (含標點符號與空白)
+    GuiControl, 1:+c007ACC, CharCountText
+    GuiControl, 1:, CharCountText, % "字數：" . len . " 字 (共 1 封簡訊)"
+} else {
+    ; 超過 70 字後，電信商的「長簡訊」計費標準通常為每 67 字拆分為一封計費 (預留 3 字作為標頭串接碼)
+    parts := Ceil(len / 67)
+    GuiControl, 1:+cRed, CharCountText ; 超出 70 字變為紅色警告
+    GuiControl, 1:, CharCountText, % "字數：" . len . " 字 (超過 70 字，將拆分為 " . parts . " 封簡訊計費)"
+}
+return
+
 ToggleSched:
-    Gui, 1:Submit, NoHide
-    if (UseSched) {
-        GuiControl, 1:Enable, SchedDate
-        GuiControl, 1:Enable, SchedHour
-        GuiControl, 1:Enable, SchedMin
-    } else {
-        GuiControl, 1:Disable, SchedDate
-        GuiControl, 1:Disable, SchedHour
-        GuiControl, 1:Disable, SchedMin
-    }
-return
-
-; --- 核心邏輯：讀取範本清單 ---
-GetTemplates() {
-    global TmplFile
-    List := ""
-    IniRead, Section, %TmplFile%, Templates
-    if (Section != "ERROR" && Section != "") {
-        Loop, Parse, Section, `n, `r  ; 處理換行與過濾 \r
-        {
-            if (A_LoopField = "")
-                continue
-            EqPos := InStr(A_LoopField, "=")
-            if (!EqPos)
-                continue
-            KeyName := Trim(SubStr(A_LoopField, 1, EqPos - 1))
-            if (KeyName = "")
-                continue
-            List .= (List == "" ? "" : "|") . KeyName
-        }
-    }
-    return List
+Gui, 1:Submit, NoHide
+; 依據 Checkbox 是否打勾，啟用或禁用時間選擇器
+if (UseSched) {
+    GuiControl, 1:Enable, SchedDate
+    GuiControl, 1:Enable, SchedHour
+    GuiControl, 1:Enable, SchedMin
+} else {
+    GuiControl, 1:Disable, SchedDate
+    GuiControl, 1:Disable, SchedHour
+    GuiControl, 1:Disable, SchedMin
 }
+return
 
-; --- 核心邏輯：API 錯誤碼對應 ---
-GetErrorReason(code) {
-    if (code = "-1")
-        return "參數錯誤，該訊息傳送失敗"
-    else if (code = "-2")
-        return "API帳號或密碼錯誤，該訊息傳送失敗"
-    else if (code = "-3")
-        return "受話方手機號碼為互動黑名單，該訊息傳送失敗"
-    else if (code = "-4")
-        return "訊息預計發送時間已逾期 24小時以上，該訊息傳送失敗"
-    else if (code = "-5")
-        return "Short Message 內容長度超過限制，該訊息傳送失敗"
-    else if (code = "-8")
-        return "受話方手機號碼格式不符，該訊息傳送失敗"
-    else if (code = "-10")
-        return "受話方手機系統不支援 MMS，該訊息傳送失敗"
-    else if (code = "301")
-        return "無額度(或額度不足)無法發送"
-    else if (code = "-99")
-        return "發生不明錯誤"
-    else
-        return "其他或未知的錯誤代碼"
+; ==============================================================================
+; 範本管理子視窗 (GUI 2) 邏輯
+; ==============================================================================
+OpenTmplMgr:
+Gui, 2:Destroy ; 先銷毀可能存在的舊視窗，確保資料與介面為最新
+Gui, 2:Default
+Gui, 2:Font, s10, Microsoft JhengHei
+
+Gui, 2:Add, Text, x15 y15, 📋 現有範本清單：
+; AltSubmit 參數允許捕捉到滑鼠點擊項目的事件 (A_GuiEvent)
+Gui, 2:Add, ListView, x15 y35 w450 h150 vTmplLV gOnTmplLVSelect Grid AltSubmit, 範本名稱|範本內容
+LV_ModifyCol(1, 130)
+LV_ModifyCol(2, 300)
+
+Gui, 2:Add, Text, x15 y200, 範本名稱：
+Gui, 2:Add, Edit, x90 y198 w375 vEditTmplTitle, 
+
+Gui, 2:Add, Text, x15 y235, 範本內容：
+Gui, 2:Add, Edit, x90 y232 w375 h60 vEditTmplContent, 
+
+Gui, 2:Add, Button, x15 y305 w215 h32 gSaveTmpl, 💾 新增 / 更新
+Gui, 2:Add, Button, x250 y305 w215 h32 gDeleteTmpl, ❌ 刪除所選
+
+GoSub, LoadTmplToLV
+Gui, 2:Show, w480 h355, ⚙️ 簡訊範本管理
+return
+
+LoadTmplToLV:
+Gui, 2:Default
+LV_Delete() ; 清空 ListView
+for title, content in Templates {
+    LV_Add("", title, content) ; 將記憶體中的陣列逐一加入表格
 }
-
-; --- UI 事件：簡訊內容字數統計與高度自適應 ---
-CountChars:
-    Gui, 1:Submit, NoHide
-
-    ; 1. 更新字數與簡訊封數統計 (超過 70 字/1封 顯示紅色警告)
-    Len := StrLen(MSG)
-    SmsCount := (Len = 0) ? 0 : Ceil(Len / 70)
-    GuiControl, 1:, CharCount, 字數: %Len% (共 %SmsCount% 封簡訊)
-    if (Len > 70)
-        GuiControl, 1:+cRed, CharCount
-    else
-        GuiControl, 1:+cGreen, CharCount
-
-    ; 2. 計算實質行數 (結合顯式換行與控制項寬度自動折行估算)
-    StrReplace(MSG, "`n", "`n", ExplicitLines)
-    ExplicitLines += 1
-    WrappedLines := (Len = 0) ? 1 : Ceil(Len / 22)
-    LineCount := (ExplicitLines > WrappedLines) ? ExplicitLines : WrappedLines
-
-    ; 3. 根據行數動態計算目標高度
-    TargetH := LineCount * 20 + 20
-    if (TargetH < MSG_MinH)
-        TargetH := MSG_MinH
-    if (TargetH > MSG_MaxH)
-        TargetH := MSG_MaxH
-
-    ; 4. 執行版面重排
-    if (TargetH != Current_MSG_H) {
-        Current_MSG_H := TargetH
-
-        GuiControl, 1:Move, MSG, h%TargetH%
-
-        ; 重新計算並移動下方所有控制項的 Y 軸位置
-        NewY_CharCount  := MSG_Y + TargetH + 8
-        NewY_TplLabel   := MSG_Y + TargetH + 32
-        NewY_TplList    := MSG_Y + TargetH + 55
-        NewY_MgrBtn     := MSG_Y + TargetH + 55
-        NewY_SendBtn    := MSG_Y + TargetH + 95
-        NewY_BottomBtns := MSG_Y + TargetH + 155  ; 包含 Log 鈕與關閉鈕
-
-        GuiControl, 1:Move, %HwndCharCount%, y%NewY_CharCount%
-        GuiControl, 1:Move, %HwndTplLabel%, y%NewY_TplLabel%
-        GuiControl, 1:Move, %HwndTplList%, y%NewY_TplList%
-        GuiControl, 1:Move, %HwndMgrBtn%, y%NewY_MgrBtn%
-        GuiControl, 1:Move, %HwndSendBtn%, y%NewY_SendBtn%
-        GuiControl, 1:Move, %HwndLogBtn%, y%NewY_BottomBtns%
-        GuiControl, 1:Move, %HwndCloseBtn%, y%NewY_BottomBtns%
-
-        ; 使用 Gui, Show 調整 Client 區域高度，防止 WinMove 導致底端按鈕被標題列與邊框裁切
-        NeededClientH := MSG_Y + TargetH + 210
-        Gui, 1:Show, h%NeededClientH%
-    }
 return
 
-; --- UI 事件：套用選擇的範本 ---
-ApplyTemplate:
-    Gui, 1:Submit, NoHide
-    if (TemplateList != "") {
-        IniRead, TmplContent, %TmplFile%, Templates, %TemplateList%, % ""
-        if (TmplContent != "ERROR") {
-            TmplContent := StrReplace(TmplContent, "\n", "`r`n")
-            GuiControl, 1:, MSG, %TmplContent%
-            Gosub, CountChars
-        }
-    }
+OnTmplLVSelect:
+; 當使用者使用滑鼠(I)點擊某個項目(S=Select)時，將資料自動帶入下方的編輯框
+if (A_GuiEvent = "I" && InStr(ErrorLevel, "S", true)) {
+    LV_GetText(selTitle, A_EventInfo, 1)
+    LV_GetText(selContent, A_EventInfo, 2)
+    GuiControl, 2:, EditTmplTitle, %selTitle%
+    GuiControl, 2:, EditTmplContent, %selContent%
+}
 return
 
-; --- 建立子視窗：範本管理模組 (Gui 2) 視窗加寬 ---
-Global HwndGui2           ; 子視窗控制代碼
-
-OpenTemplateManager:
-    Gui, 2:Destroy ; 防止重複建立視窗
-    Gui, 2:New, +HwndHwndGui2
-    Gui, 2:Default
-    Gui, 2:Font, s10, Microsoft JhengHei
-
-    Gui, 2:Add, Text, x20 y20 w300, 📁 現有範本列表 (點選載入修改):
-    Gui, 2:Add, ListBox, vTmplListBox x20 y45 w300 r5 gLoadSelectedTmpl +HScroll, % GetTemplates()
-
-    Gui, 2:Add, Text, x20 y155 w300, 📝 範本名稱:
-    Gui, 2:Add, Edit, vTmplName x20 y180 w300 h28
-
-    Gui, 2:Add, Text, x20 y220 w300, 💬 範本內容:
-    Gui, 2:Add, Edit, vTmplContent x20 y245 w300 h100 gCountTmplChars +Multi +WantReturn +VScroll
-
-    Gui, 2:Add, Text, x20 vTmplCharCount cGreen w300 y355, 字數: 0 (共 0 封簡訊)
-    Gui, 2:Add, Button, gSaveTmpl w140 h35 x20 y385, 💾 新增 / 儲存
-    Gui, 2:Add, Button, gDeleteTmpl x180 y385 w140 h35, 🗑 刪除選擇
-
-    Gui, 2:Show, w340 h440, 範本管理
-return
-
-; --- 範本管理事件：即時字數統計 ---
-CountTmplChars:
-    Gui, 2:Submit, NoHide
-    Len := StrLen(TmplContent)
-    SmsCount := (Len = 0) ? 0 : Ceil(Len / 70)
-    GuiControl, 2:, TmplCharCount, 字數: %Len% (共 %SmsCount% 封簡訊)
-    if (Len > 70)
-        GuiControl, 2:+cRed, TmplCharCount
-    else
-        GuiControl, 2:+cGreen, TmplCharCount
-return
-
-; --- 範本管理事件：載入所選範本 ---
-LoadSelectedTmpl:
-    Gui, 2:Submit, NoHide
-    if (TmplListBox != "") {
-        IniRead, Content, %TmplFile%, Templates, %TmplListBox%, % ""
-        if (Content != "ERROR") {
-            Content := StrReplace(Content, "\n", "`r`n")
-            GuiControl, 2:, TmplName, %TmplListBox%
-            GuiControl, 2:, TmplContent, %Content%
-            Gosub, CountTmplChars
-        }
-    }
-return
-
-; --- 範本管理事件：儲存範本 ---
 SaveTmpl:
-    Gui, 2:Submit, NoHide
-    if (TmplName = "") {
-        MsgBox, 48, 提示, 請輸入有效的範本名稱！
-        return
-    }
-    ; 將多行內文轉義為 \n 以保持 INI 單行鍵值對格式
-    SaveContent := StrReplace(TmplContent, "`r`n", "\n")
-    SaveContent := StrReplace(SaveContent, "`n", "\n")
-    SaveContent := StrReplace(SaveContent, "`r", "\n")
-    IniWrite, %SaveContent%, %TmplFile%, Templates, %TmplName%
+Gui, 2:Submit, NoHide
+if (EditTmplTitle = "" || EditTmplContent = "") {
+    MsgBox, 48, 提示, 範本名稱與內容皆不可為空！
+    return
+}
+; 同步更新記憶體與實體登錄檔
+Templates[EditTmplTitle] := EditTmplContent
+RegWrite, REG_SZ, %TmplRegPath%, %EditTmplTitle%, %EditTmplContent%
 
-    ; 同步更新主視窗與子視窗的範本下拉清單/列表
-    NewList := GetTemplates()
-    GuiControl, 2:, TmplListBox, |%NewList%
-    GuiControl, 1:, TemplateList, |%NewList%
-    GuiControl, 1:Choose, TemplateList, 1  ; 重置選取狀態
-
-    MsgBox, 64, 成功, 範本「%TmplName%」已儲存！
+GoSub, LoadTmplToLV  ; 更新清單
+GoSub, RefreshTmplDDL ; 同步更新主視窗下拉選單
+MsgBox, 64, 成功, 範本已成功儲存！
 return
 
-; --- 範本管理事件：刪除範本 ---
 DeleteTmpl:
-    Gui, 2:Submit, NoHide
-    if (TmplName = "") {
-        MsgBox, 48, 提示, 請選擇要刪除的範本！
-        return
-    }
-    IniDelete, %TmplFile%, Templates, %TmplName%
-
-    ; 清空編輯區
-    GuiControl, 2:, TmplName,
-    GuiControl, 2:, TmplContent,
-    GuiControl, 2:, TmplCharCount, 字數: 0
-
-    ; 同步更新列表
-    NewList := GetTemplates()
-    GuiControl, 2:, TmplListBox, |%NewList%
-    GuiControl, 1:, TemplateList, |%NewList%
-    GuiControl, 1:Choose, TemplateList, 1
-
-    MsgBox, 64, 成功, 範本已成功刪除！
-return
-
-; =========================================
-; --- 建立子視窗：發送紀錄查詢模組 (Gui 3) ---
-; =========================================
-Global HwndGui3
-
-OpenLog:
-    if (!FileExist(LogFile)) {
-        MsgBox, 64, 提示, 目前尚未產生任何發送紀錄喔！
-        return
-    }
-
-    Gui, 3:Destroy ; 防止重複建立視窗
-    Gui, 3:New, +HwndHwndGui3
-    Gui, 3:Default
-    Gui, 3:Font, s10, Microsoft JhengHei
-
-    ; 頂部搜尋區塊
-    Gui, 3:Add, Text, x20 y20 w400, 🔍 搜尋 (可輸入電話、批次號碼、狀態或內容):
-    Gui, 3:Add, Edit, vSearchKeyword x20 y45 w460 h28
-    Gui, 3:Add, Button, gLoadLogData Default x490 y44 w110 h30, 篩選紀錄
-    Gui, 3:Add, Button, gClearLogSearch x610 y44 w90 h30, 顯示全部
-
-    ; 建立表格 (ListView，寬度擴展至 780 避免滾動條出現時內容遭擠壓)
-    Gui, 3:Add, ListView, vLogLV x20 y85 w780 h320 Grid, 發送時間|手機號碼|狀態|扣除點數|批次號碼|簡訊內容|原因
-    LV_ModifyCol(1, 140) ; 時間
-    LV_ModifyCol(2, 105) ; 電話
-    LV_ModifyCol(3, 50)  ; 狀態
-    LV_ModifyCol(4, 75)  ; 扣除點數
-    LV_ModifyCol(5, 90)  ; 批次
-    LV_ModifyCol(6, 170) ; 內容
-    LV_ModifyCol(7, 130) ; 原因
-
-    Gui, 3:Show, w820 h430, 📜 發送紀錄查詢
-
-    ; 視窗開啟時自動載入所有資料
-    Gosub, LoadLogData
-return
-
-; 清除搜尋條件並重新載入
-ClearLogSearch:
-    GuiControl, 3:, SearchKeyword,
-    Gosub, LoadLogData
-return
-
-; 讀取 Log 檔並過濾載入 ListView
-LoadLogData:
-    Gui, 3:Submit, NoHide
-    Gui, 3:Default
-    LV_Delete() ; 清空現有表格資料
-
-    FileRead, FullLog, %LogFile%
-    Loop, Parse, FullLog, `n, `r
-    {
-        if (A_LoopField = "")
-            continue
-
-        ; 若有輸入關鍵字，且該行找不到該關鍵字則跳過
-        if (SearchKeyword != "" && !InStr(A_LoopField, SearchKeyword))
-            continue
-
-        ; 使用正則表達式精準萃取各個欄位
-        RegExMatch(A_LoopField, "\[(.*?)\]", mTime)
-        RegExMatch(A_LoopField, "電話:\s(.*?)\s*\|", mPhone)
-        RegExMatch(A_LoopField, "狀態:\s(.*?)\s*\|", mStatus)
-        RegExMatch(A_LoopField, "扣除點數:\s(.*?)\s*\|", mPoints)
-        RegExMatch(A_LoopField, "批次號碼:\s(.*?)\s*\|", mBatch)
-        RegExMatch(A_LoopField, "內容:\s(.*?)\s*\|", mContent)
-        RegExMatch(A_LoopField, "原因:\s(.*?)\s*\|", mReason)
-
-        PointsVal := (mPoints1 != "") ? mPoints1 : "0"
-
-        ; 將萃取出的資料填入表格中
-        LV_Add("", mTime1, mPhone1, mStatus1, PointsVal, mBatch1, mContent1, mReason1)
-    }
-
-    ; 將表格自動捲動到最底部 (顯示最新紀錄)
-    LV_Modify(LV_GetCount(), "Vis")
-return
-
-; --- 關閉與重置事件處理 ---
-3GuiClose:
-    Gui, 3:Destroy
+Gui, 2:Default
+Row := LV_GetNext(0, "Focused") ; 取得當前選中的行數
+if (!Row) {
+    MsgBox, 48, 提示, 請先點擊選擇要刪除的範本！
+    return
+}
+LV_GetText(delTitle, Row, 1)
+MsgBox, 52, 刪除確認, 確定要刪除範本「%delTitle%」嗎？
+IfMsgBox, Yes
+{
+    Templates.Delete(delTitle)
+    RegDelete, %TmplRegPath%, %delTitle%
+    GuiControl, 2:, EditTmplTitle,  ; 清空編輯框
+    GuiControl, 2:, EditTmplContent, 
+    GoSub, LoadTmplToLV
+    GoSub, RefreshTmplDDL
+    MsgBox, 64, 完成, 已成功刪除該範本！
+}
 return
 
 2GuiClose:
-    Gui, 2:Destroy ; 僅銷毀子視窗
+Gui, 2:Destroy ; 關閉範本視窗時僅銷毀子視窗，不影響主程式
+return
+
+; ==============================================================================
+; API 核心事件：查詢點數與發送簡訊
+; ==============================================================================
+CheckCredit:
+; 呼叫 GetCredit.ashx 取得剩餘點數
+URL := "https://new.e8d.tw/API21/HTTP/GetCredit.ashx"
+PostData := "UID=" . URIEncode(SavedUID) . "&PWD=" . URIEncode(SavedPWD)
+res := HTTPPost(URL, PostData)
+
+; 判斷回傳值是否為數字 (包含小數點與負數)
+if (RegExMatch(res, "^-?\d+(\.\d+)?$")) {
+    if (res >= 0)
+        MsgBox, 64, 餘額查詢成功, 您的 EVERY8D 簡訊剩餘點數為：%res% 點
+    else
+        MsgBox, 16, 查詢失敗, 錯誤代碼：%res%（請檢查帳號密碼是否正確）
+} else {
+    MsgBox, 48, 系統回應, 回應內容：%res%
+}
+return
+
+SendSMS:
+Gui, 1:Submit, NoHide
+if (DEST = "" || MSG = "") {
+    MsgBox, 48, 提示, 請填寫手機號碼與簡訊內容！
+    return
+}
+
+URL := "https://new.e8d.tw/API21/HTTP/SendSMS.ashx"
+; 將所有參數轉換為 URL 安全編碼 (UTF-8 格式) 以防中文變亂碼
+PostData := "UID=" . URIEncode(SavedUID) . "&PWD=" . URIEncode(SavedPWD) . "&DEST=" . URIEncode(DEST) . "&MSG=" . URIEncode(MSG)
+
+; 處理預約時間參數 (ST)
+if (UseSched) {
+    FormatTime, SDate, %SchedDate%, yyyyMMdd
+    STime := SDate . SchedHour . SchedMin . "00" ; 格式需求為：YYYYMMDDHHMMSS
+    PostData .= "&ST=" . STime
+}
+
+res := HTTPPost(URL, PostData)
+
+; 剖析 EVERY8D SendSMS 回應字串 (格式：credit,sended,cost,unsend,batch_id)
+StringSplit, ResArr, res, `,
+
+FormatTime, CurrentTime,, yyyy-MM-dd HH:mm:ss
+; 寫入 Log 前先清除簡訊內容中的換行，防止破壞 txt 的單行欄位格式
+CleanMSG := StrReplace(MSG, "`n", " ")
+CleanMSG := StrReplace(CleanMSG, "`r", "")
+
+; 成功判定條件：ResArr1(點數餘額)為數字且 >= 0，且 ResArr2(發送數) > 0
+if (ResArr1 != "" && ResArr1 >= 0 && ResArr2 > 0) {
+    BatchID := (ResArr5 != "") ? ResArr5 : "N/A"
+    Cost := (ResArr3 != "") ? ResArr3 : "0"
+    StatusStr := UseSched ? "預約成功" : "發送成功"
+    
+    MsgBox, 64, 發送成功, 簡訊已成功送出！`n批次號碼 (BatchID)：%BatchID%`n扣除點數：%Cost% 點`n剩餘點數：%ResArr1% 點
+    
+    ; 寫入日誌 (7 欄位格式)
+    LogEntry := CurrentTime . " | " . StatusStr . " | " . DEST . " | " . CleanMSG . " | " . BatchID . " | " . Cost . " | -"
+} else {
+    MsgBox, 16, 發送失敗, API 回傳訊息：%res%
+    ; 失敗紀錄 (填入 0 點數與 API 回傳的錯誤原因)
+    LogEntry := CurrentTime . " | 發送失敗 | " . DEST . " | " . CleanMSG . " | N/A | 0 | " . res
+}
+
+FileAppend, %LogEntry%`n, %LogFile%, UTF-8
 return
 
 ResetAuth:
-    MsgBox, 52, 重置確認, 確定要清除已儲存的帳號密碼嗎？`n清除後程式將會重新啟動。
-    IfMsgBox, Yes
-    {
-        FileSetAttrib, -H, %IniFile%
-        FileDelete, %IniFile%
-        Reload
-    }
+MsgBox, 52, 重置確認, 確定要清除儲存在登錄檔中的帳密嗎？`n清除後程式將自動重新啟動。
+IfMsgBox, Yes
+{
+    RegDelete, %RegPath%, UID
+    RegDelete, %RegPath%, PWD
+    Reload ; 自動重啟程式重新觸發初始化設定
+}
 return
 
-CloseApp:
+; ==============================================================================
+; 紀錄查詢子視窗 (GUI 3) - 包含搜尋與舊版 Log 相容處理
+; ==============================================================================
+ShowLogWindow:
+Gui, 3:Destroy
+Gui, 3:Default ; ★重要：宣告接下來的操作對象為 GUI 3，確保 ListView 欄位寬度設定生效
+Gui, 3:Font, s10, Microsoft JhengHei
+Gui, 3:Add, Text, x15 y15, 🔍 關鍵字搜尋：
+Gui, 3:Add, Edit, x110 y12 w350 vFilterKeyword gFilterLogs, 
+Gui, 3:Add, Button, x470 y10 w120 h30 gFilterLogs, 篩選紀錄
+
+; 表格定義與顯示順序對調 (將狀態放第二欄，手機號碼放第三欄)
+Gui, 3:Add, ListView, x15 y50 w770 h380 vLogLV Grid, 時間|狀態|手機號碼|簡訊內容|批次號碼|扣除點數|失敗原因
+LV_ModifyCol(1, 120) ; 時間
+LV_ModifyCol(2, 70)  ; 狀態
+LV_ModifyCol(3, 100) ; 手機號碼
+LV_ModifyCol(4, 220) ; 簡訊內容 (主要閱讀區間拉最大)
+LV_ModifyCol(5, 90)  ; 批次號碼
+LV_ModifyCol(6, 60)  ; 扣除點數
+LV_ModifyCol(7, 80)  ; 失敗原因
+
+GoSub, LoadLogsToLV
+Gui, 3:Show, w800 h450, 📜 發送紀錄查詢
+return
+
+LoadLogsToLV:
+Gui, 3:Default
+LV_Delete() ; 重繪前先清空當前列表
+if (FileExist(LogFile)) {
+    Loop, Read, %LogFile%
+    {
+        if (A_LoopReadLine = "")
+            continue
+        ; 以 "|" 符號切割每一行的內容
+        StringSplit, Field, A_LoopReadLine, |
+        
+        ; 【向下相容處理】
+        ; 因舊版程式只記錄了 6 個欄位，新版加入了「扣除點數」變成 7 個欄位。
+        ; 透過判斷 Field0 (切割後的總陣列數) 來決定如何賦值，確保舊紀錄依然可正常讀取。
+        fTime := Trim(Field1)
+        fStatus := Trim(Field2)
+        fDest := Trim(Field3)
+        
+        if (Field0 == 6) { ; 舊版相容邏輯
+            fMsg := Trim(Field4)
+            fBatchID := Trim(Field5)
+            fCost := "-"
+            fReason := Trim(Field6)
+        } else {           ; 新版 7 欄位邏輯 (依據寫入順序剖析)
+            fMsg := Trim(Field4)
+            fBatchID := Trim(Field5)
+            fCost := Trim(Field6)
+            fReason := Trim(Field7)
+        }
+
+        ; 若有搜尋條件，比對電話、內容與批次碼，不符合者直接略過不加入表格
+        if (FilterKeyword != "") {
+            if (!InStr(fDest, FilterKeyword) && !InStr(fMsg, FilterKeyword) && !InStr(fBatchID, FilterKeyword))
+                continue
+        }
+
+        LV_Add("", fTime, fStatus, fDest, fMsg, fBatchID, fCost, fReason)
+    }
+}
+return
+
+FilterLogs:
+Gui, 3:Submit, NoHide
+GoSub, LoadLogsToLV
+return
+
+3GuiClose:
+Gui, 3:Destroy
+return
+
 1GuiClose:
 GuiClose:
 ExitApp
 
-; --- 核心邏輯：發送簡訊 API 請求 ---
-SendSMS:
-    Gui, 1:Submit, NoHide
+; ==============================================================================
+; 共用核心工具函式：HTTP 請求與網址安全編碼
+; ==============================================================================
 
-    ; [防呆功能] 自動過濾：移除非數字與非逗號的字元 (例如空白、連字號等)
-    CleanDEST := RegExReplace(DEST, "[^\d,]")
-
-    ; [防呆功能] 去除頭尾可能因為誤刪造成多餘的逗號
-    CleanDEST := RegExReplace(CleanDEST, "^,+|,+$")
-
-    if (CleanDEST = "" || MSG = "") {
-        MsgBox, 48, 提示, 請輸入有效的手機號碼與簡訊內容！
-        return
-    }
-
-    ; 更新介面顯示過濾後的號碼，並將參數替換為乾淨的版本
-    GuiControl, 1:, DEST, %CleanDEST%
-    DEST := CleanDEST
-
-    ; 決定是否帶入預約時間
-    ST_Val := ""
-    if (UseSched) {
-        ; AHK的 SchedDate 會原生回傳 YYYYMMDDHHMISS 格式，我們只取前8碼(年月日)
-        ; 接著拼接自訂下拉選單的 SchedHour (時) 與 SchedMin (分)，最後補上 00 (秒)
-        ST_Val := SubStr(SchedDate, 1, 8) . SchedHour . SchedMin . "00"
-    }
-
-    ; 確保內文及特殊字元正確傳遞 (避免 URL 截斷)
-    EncodedMSG := URIEncode(MSG)
-    URL := "https://new.e8d.tw/API21/HTTP/SendSMS.ashx"
-    PostData := "UID=" . SavedUID . "&PWD=" . SavedPWD . "&MSG=" . EncodedMSG . "&DEST=" . DEST . "&ST=" . ST_Val . "&RETRYTIME=1440"
-
-    ; 執行 HTTP POST
+; HTTPPost: 用於向伺服器發送 POST 請求
+HTTPPost(url, postData) {
     whr := ComObjCreate("WinHttp.WinHttpRequest.5.1")
-    whr.Open("POST", URL, true)
-    whr.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded")
+    whr.Open("POST", url, false) ; false 代表同步請求，等待伺服器回應
+    whr.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+    whr.Send(postData)
+    return whr.ResponseText
+}
 
-    IsNetworkSuccess := true
-    try {
-        whr.Send(PostData)
-        whr.WaitForResponse()
-        Result := whr.ResponseText
-    } catch e {
-        Result := "連線失敗"
-        IsNetworkSuccess := false
-    }
-
-    ; --- API 回傳結果解析 ---
-    FormatTime, CurrentTime,, yyyy-MM-dd HH:mm:ss
-    Status := "失敗"
-    ErrorReason := "無"
-    BatchID := ""
-
-    if (!IsNetworkSuccess) {
-        Status := "失敗"
-        ErrorReason := "連線失敗，請檢查網路或 API 位址。"
-    } else {
-        StringSplit, Res, Result, `,
-        FirstField := Trim(Res1)
-
-        ; 成功條件：首欄非負號，且回傳欄位數量大於等於 5 (標準規格)
-        if (SubStr(FirstField, 1, 1) != "-" && Res0 >= 5) {
-            Status := "成功"
-            BatchID := Trim(Res5)  ; 擷取第5個欄位的 BatchID
-
-            ; 若有啟用預約，則顯示設定的年月日時分給使用者看
-            if (ST_Val != "") {
-                FriendlyTime := SubStr(ST_Val, 1, 4) . "-" . SubStr(ST_Val, 5, 2) . "-" . SubStr(ST_Val, 7, 2) . " " . SubStr(ST_Val, 9, 2) . ":" . SubStr(ST_Val, 11, 2)
-                ErrorReason := "預約發送設定成功 (" . FriendlyTime . ")"
-            } else {
-                ErrorReason := "發送成功"
-            }
-        } else {
-            Status := "失敗"
-            ErrorReason := GetErrorReason(FirstField)
-
-            ; 若 API 提供額外的錯誤訊息，一併附上
-            ApiMsg := (Res0 >= 2) ? Trim(Res2) : ""
-            if (ApiMsg != "") {
-                ErrorReason .= " - " . ApiMsg
-            }
-        }
-    }
-
-    ; 計算每組手機扣除點數（成功時為該簡訊封數，失敗為 0）
-    SmsCount := (StrLen(MSG) = 0) ? 0 : Ceil(StrLen(MSG) / 70)
-    DeductedPoints := (Status = "成功") ? SmsCount : 0
-
-    ; --- 紀錄 Log 檔 (支援多組號碼分列紀錄，並新增扣除點數與 BatchID 欄位) ---
-    ; 將簡訊內容的換行替換為空白，確保 Log 保持嚴謹的單行格式，以利後續的表格分析與讀取搜尋
-    CleanLogMSG := StrReplace(MSG, "`n", " ")
-    CleanLogMSG := StrReplace(CleanLogMSG, "`r", "")
-
-    Loop, Parse, DEST, `,
-    {
-        TargetPhone := Trim(A_LoopField)
-        if (TargetPhone = "")
-            continue
-
-        LogEntry := Format("[{1}] 電話: {2} | 內容: {3} | 狀態: {4} | 扣除點數: {5} | 批次號碼: {6} | 原因: {7} | 預約時間: {8} | 回應: {9}`n"
-            , CurrentTime, TargetPhone, CleanLogMSG, Status, DeductedPoints, (BatchID != "" ? BatchID : "無"), ErrorReason, (ST_Val != "" ? ST_Val : "即時發送"), Result)
-        FileAppend, %LogEntry%, %LogFile%
-    }
-
-    ; --- 處理發送後 UI 狀態 ---
-    if (Status = "成功") {
-        if (ST_Val != "")
-            MsgBox, 64, 成功, 簡訊預約成功！`n`n預約送出時間: %FriendlyTime%`n批次號碼: %BatchID%
-        else
-            MsgBox, 64, 成功, 簡訊發送成功！`n`n批次號碼: %BatchID%
-
-        GuiControl, 1:, DEST,  ; 成功後清空號碼欄位以防誤傳，保留內文
-    } else {
-        MsgBox, 48, 失敗, 簡訊發送失敗。`n`n狀態: %Status%`n失敗原因: %ErrorReason%`n回應內容: %Result%
-
-        ; --- 主動偵測帳密錯誤並提示重置 ---
-        if (FirstField = "-2") {
-            MsgBox, 52, 帳密錯誤, 系統偵測到您的 API 帳號或密碼發生錯誤。`n請問是否要清除記錄並重新設定？
-            IfMsgBox, Yes
-            {
-                FileSetAttrib, -H, %IniFile%
-                FileDelete, %IniFile%
-                Reload
-            }
-        }
-    }
-return
-
-; --- 核心工具：UTF-8 URL 編碼 (支援中文與特殊符號) ---
-URIEncode(str, encoding="UTF-8") {
-    local Var, char, code, hex, i
-    VarSetCapacity(Var, StrPut(str, encoding))
-    StrPut(str, &Var, encoding)
+; URIEncode: 確保傳送的中文與特殊符號 (如 + # &) 能被伺服器正確解析
+; 原理：將非英數字元轉換成 UTF-8 Hex Code (如 "%E6%B8%AC" 代表 "測")
+URIEncode(str) {
+    VarSetCapacity(Var, StrPut(str, "UTF-8"))
+    StrPut(str, &Var, "UTF-8")
     while code := NumGet(Var, A_Index - 1, "UChar") {
-        if (code >= 0x30 && code <= 0x39  ; 0-9
-            || code >= 0x41 && code <= 0x5A  ; A-Z
-            || code >= 0x61 && code <= 0x7A  ; a-z
-            || code == 0x2D || code == 0x2E  ; - .
-            || code == 0x5F || code == 0x7E) ; _ ~
+        ; 保留標準的英文、數字、連字號、底線等不需編碼的字元
+        if (code >= 0x30 && code <= 0x39 || code >= 0x41 && code <= 0x5A || code >= 0x61 && code <= 0x7A || code == 0x2D || code == 0x2E || code == 0x5F || code == 0x7E)
             char .= Chr(code)
         else {
             hex := Format("{:02X}", code)
@@ -617,47 +455,4 @@ URIEncode(str, encoding="UTF-8") {
         }
     }
     return char
-}
-
-; ==========================================
-; --- 核心工具：帳號密碼 XOR 安全加解密模組 ---
-; ==========================================
-
-; 將字串進行 XOR 混淆，並轉換為 Hex (十六進位) 格式儲存
-Encrypt(str, key:="E8DSecureKey2026") {
-    hexStr := ""
-    keyLen := StrLen(key)
-    Loop, Parse, str
-    {
-        charAsc := Asc(A_LoopField)
-        keyCharAsc := Asc(SubStr(key, Mod(A_Index-1, keyLen)+1, 1))
-        xorVal := charAsc ^ keyCharAsc
-        hexVal := Format("{:02X}", xorVal)
-        hexStr .= hexVal
-    }
-    return hexStr
-}
-
-; 讀取 Hex (十六進位) 字串，轉為十進位後進行 XOR 解密還原
-Decrypt(hexStr, key:="E8DSecureKey2026") {
-    str := ""
-    keyLen := StrLen(key)
-    len := StrLen(hexStr)
-    i := 1
-    charIndex := 1
-    while (i < len) {
-        hexPair := SubStr(hexStr, i, 2)
-
-        ; 將 Hex 字串轉換為數值，並確保 AHK 正確識別數值型態以進行 XOR 運算
-        xorVal := "0x" . hexPair
-        xorVal += 0
-
-        keyCharAsc := Asc(SubStr(key, Mod(charIndex-1, keyLen)+1, 1))
-        charAsc := xorVal ^ keyCharAsc
-        str .= Chr(charAsc)
-
-        i += 2
-        charIndex++
-    }
-    return str
 }
