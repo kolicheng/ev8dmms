@@ -23,42 +23,43 @@ if (!FileExist(IniFile)) {
     IniRead, SavedPWD, %IniFile%, Credentials, PWD, % ""
 }
 
-; --- 初始化控制項位置參數 (用於主視窗自適應排版) ---
-Global MSG_Y := 145       ; MSG 編輯框起始 Y 軸
+; --- 初始化控制項位置參數 ---
+Global MSG_Y := 144       ; MSG 編輯框起始 Y 軸
 Global MSG_MinH := 100    ; 最低高度
-Global MSG_MaxH := 250    ; 最高高度 (避免無限長出螢幕)
+Global MSG_MaxH := 220    ; 最高高度
 Global Current_MSG_H := 100
+Global HwndGui1           ; 主視窗 Hwnd
 
 ; --- 主視窗介面 (Gui 1) ---
+Gui, 1:New, +HwndHwndGui1
 Gui, 1:Default
-Gui, 1:Font, s10, Microsoft JhengHei ; 使用微軟正黑體，提升質感
+Gui, 1:Font, s10, Microsoft JhengHei
 
-Gui, 1:Add, Text, w320, 手機號碼 (多組號碼以逗號隔開):
+Gui, 1:Add, Text, x20 y20 w320, 📱 手機號碼 (多組號碼以半形逗號隔開):
 Gui, 1:Add, Edit, vDEST w320 h28, 0900000000
 
-; --- 新增：預約發送設定區 ---
-Gui, 1:Add, CheckBox, vUseSched gToggleSched y+15, 啟用預約發送
-Gui, 1:Add, DateTime, vSchedTime w180 h28 x+10 yp-4 Disabled Choose%A_Now%, yyyy-MM-dd HH:mm:ss
+; 預約發送設定區 (精確對齊)
+Gui, 1:Add, CheckBox, vUseSched gToggleSched x20 y+15 h20, 📅 啟用預約發送
+Gui, 1:Add, DateTime, vSchedTime w180 h28 x160 yp-4 Disabled Choose%A_Now%, yyyy-MM-dd HH:mm:ss
 
-; 重置 X 座標到 20 左邊界，避免受上方 x+10 影響
-Gui, 1:Add, Text, x20 y+15, 簡訊內容:
+Gui, 1:Add, Text, x20 y+15 w320, 💬 簡訊內容:
 ; 綁定 gCountChars 監聽字數與自動高度調整
-Gui, 1:Add, Edit, vMSG w320 h100 gCountChars +Multi +WantReturn
+Gui, 1:Add, Edit, vMSG x20 y144 w320 h100 gCountChars +Multi +WantReturn
 
 ; 以下為需要動態下移的控制項，皆加上 HWND 以便在代碼中控制位置
-Gui, 1:Add, Text, vCharCount cGreen w320 y+8 hwndHwndCharCount, 字數: 0
-Gui, 1:Add, Text, y+12 hwndHwndTplLabel, 快速選取範本:
-Gui, 1:Add, DropDownList, vTemplateList w200 gApplyTemplate hwndHwndTplList, % GetTemplates()
-Gui, 1:Add, Button, gOpenTemplateManager w110 h28 x+10 yp-1 hwndHwndMgrBtn, ⚙ 管理範本
+Gui, 1:Add, Text, x20 vCharCount cGreen w320 y252 hwndHwndCharCount, 字數: 0
+Gui, 1:Add, Text, x20 y276 w320 hwndHwndTplLabel, 快速選取範本:
+Gui, 1:Add, DropDownList, vTemplateList w210 gApplyTemplate x20 y299 hwndHwndTplList, % GetTemplates()
+Gui, 1:Add, Button, gOpenTemplateManager w100 h28 x+10 yp-1 hwndHwndMgrBtn, ⚙ 管理範本
 
-Gui, 1:Font, s11 Bold, Microsoft JhengHei ; 加大並加粗發送按鈕
-Gui, 1:Add, Button, gSendSMS w320 h50 x20 y+20 hwndHwndSendBtn, ✉ 發送簡訊
-Gui, 1:Font ; 恢復一般字型
+Gui, 1:Font, s11 Bold, Microsoft JhengHei
+Gui, 1:Add, Button, gSendSMS w320 h50 x20 y339 hwndHwndSendBtn, ✉ 發送簡訊
+Gui, 1:Font
 
 Gui, 1:Font, s10, Microsoft JhengHei
-Gui, 1:Add, Button, gCloseApp w320 h35 y+10 hwndHwndCloseBtn, ❌ 關閉視窗
+Gui, 1:Add, Button, gCloseApp w320 h35 x20 y399 hwndHwndCloseBtn, ❌ 關閉視窗
 
-Gui, 1:Show, w360, 發簡訊小工具
+Gui, 1:Show, w360, 發簡訊 v1
 return
 
 ; --- 監聽「啟用預約發送」核取方塊 ---
@@ -90,7 +91,7 @@ GetTemplates() {
     return List
 }
 
-; --- 依據規格書分類錯誤原因的函數 ---
+; --- 分類錯誤 ---
 GetErrorReason(code) {
     if (code = "-1")
         return "參數錯誤，該訊息傳送失敗"
@@ -114,7 +115,7 @@ GetErrorReason(code) {
         return "其他或未知的錯誤代碼"
 }
 
-; --- 主視窗：即時字數統計 & 編輯框高度自適應調整 ---
+; --- 主視窗 ---
 CountChars:
     Gui, 1:Submit, NoHide
     
@@ -137,37 +138,30 @@ CountChars:
     if (TargetH > MSG_MaxH)
         TargetH := MSG_MaxH
         
-    ; 當高度有變化時，動態調整所有下方控制項位置與視窗大小
     if (TargetH != Current_MSG_H) {
-        Delta := TargetH - Current_MSG_H
         Current_MSG_H := TargetH
         
         ; 調整 MSG 輸入框高度
         GuiControl, 1:Move, MSG, h%TargetH%
         
-        ; 移動下方所有控制項 (使用 HWND 以確保精準)
-        ControlGetPos, CX, CY, CW, CH,, ahk_id %HwndCharCount%
-        GuiControl, 1:Move, %HwndCharCount%, % "y" (CY + Delta)
+        ; 計算下方控制項的新 Y 座標 (絕對定位)
+        NewY_CharCount := 144 + TargetH + 8
+        NewY_TplLabel  := 144 + TargetH + 32
+        NewY_TplList   := 144 + TargetH + 55
+        NewY_MgrBtn    := 144 + TargetH + 55
+        NewY_SendBtn   := 144 + TargetH + 95
+        NewY_CloseBtn  := 144 + TargetH + 155
         
-        ControlGetPos, TX, TY, TW, TH,, ahk_id %HwndTplLabel%
-        GuiControl, 1:Move, %HwndTplLabel%, % "y" (TY + Delta)
+        GuiControl, 1:Move, %HwndCharCount%, y%NewY_CharCount%
+        GuiControl, 1:Move, %HwndTplLabel%, y%NewY_TplLabel%
+        GuiControl, 1:Move, %HwndTplList%, y%NewY_TplList%
+        GuiControl, 1:Move, %HwndMgrBtn%, y%NewY_MgrBtn%
+        GuiControl, 1:Move, %HwndSendBtn%, y%NewY_SendBtn%
+        GuiControl, 1:Move, %HwndCloseBtn%, y%NewY_CloseBtn%
         
-        ControlGetPos, LX, LY, LW, LH,, ahk_id %HwndTplList%
-        GuiControl, 1:Move, %HwndTplList%, % "y" (LY + Delta)
-        
-        ControlGetPos, MX, MY, MW, MH,, ahk_id %HwndMgrBtn%
-        GuiControl, 1:Move, %HwndMgrBtn%, % "y" (MY + Delta)
-        
-        ControlGetPos, SX, SY, SW, SH,, ahk_id %HwndSendBtn%
-        GuiControl, 1:Move, %HwndSendBtn%, % "y" (SY + Delta)
-        
-        ControlGetPos, KX, KY, KW, KH,, ahk_id %HwndCloseBtn%
-        GuiControl, 1:Move, %HwndCloseBtn%, % "y" (KY + Delta)
-        
-        ; 動態調整主視窗高度
-        WinGetPos, WX, WY, WW, WH, EVERY8D 簡訊發送器
-        NewWinH := WH + Delta
-        WinMove, EVERY8D 簡訊發送器,,,, %NewWinH%
+        ; 動態調整主視窗高度 (加上 AHK 邊框和標題列高度大約 45px)
+        NewWinH := 144 + TargetH + 155 + 35 + 45
+        WinMove, ahk_id %HwndGui1%,,,,, %NewWinH%
     }
 return
 
@@ -184,36 +178,32 @@ ApplyTemplate:
 return
 
 
-; --- 初始化子視窗控制項位置參數 (用於子視窗自適應排版) ---
-Global MGR_MSG_MinH := 80
-Global MGR_MSG_MaxH := 200
-Global Current_MGR_MSG_H := 80
+; --- 子視窗：管理範本介面 ---
+Global HwndGui2           ; 子視窗 Hwnd
 
-; --- 子視窗：管理範本介面 (Gui 2) ---
 OpenTemplateManager:
     Gui, 2:Destroy ; 重置防重複建立
+    Gui, 2:New, +HwndHwndGui2
     Gui, 2:Default
     Gui, 2:Font, s10, Microsoft JhengHei
     
-    Gui, 2:Add, Text,, 現有範本列表 (點選載入修改):
-    Gui, 2:Add, ListBox, vTmplListBox w260 r5 gLoadSelectedTmpl, % GetTemplates()
+    Gui, 2:Add, Text, x20 y20 w260, 📁 現有範本列表 (點選載入修改):
+    Gui, 2:Add, ListBox, vTmplListBox x20 y45 w260 r5 gLoadSelectedTmpl, % GetTemplates()
     
-    Gui, 2:Add, Text, y+15, 範本名稱:
-    Gui, 2:Add, Edit, vTmplName w260 h28
+    Gui, 2:Add, Text, x20 y155 w260, 📝 範本名稱:
+    Gui, 2:Add, Edit, vTmplName x20 y180 w260 h28
     
-    Gui, 2:Add, Text, y+15, 範本內容 (輸入多行時自動伸展高度):
-    Gui, 2:Add, Edit, vTmplContent w260 h80 gCountTmplChars +Multi +WantReturn
+    Gui, 2:Add, Text, x20 y220 w260, 💬 範本內容:
+    Gui, 2:Add, Edit, vTmplContent x20 y245 w260 h100 gCountTmplChars +Multi +WantReturn +VScroll
     
-    ; 子視窗需要下移的控制項
-    Gui, 2:Add, Text, vTmplCharCount cGreen w260 y+8 hwndHwndMgrCharCount, 字數: 0
-    Gui, 2:Add, Button, gSaveTmpl w120 h35 y+15 hwndHwndMgrSaveBtn, 新增 / 儲存更新
-    Gui, 2:Add, Button, gDeleteTmpl x+20 yp w120 h35 hwndHwndMgrDelBtn, 刪除選擇
+    Gui, 2:Add, Text, x20 vTmplCharCount cGreen w260 y355, 字數: 0
+    Gui, 2:Add, Button, gSaveTmpl w120 h35 x20 y385, 💾 新增 / 儲存
+    Gui, 2:Add, Button, gDeleteTmpl x160 y385 w120 h35, 🗑 刪除選擇
     
-    Current_MGR_MSG_H := 80
-    Gui, 2:Show, w300, 範本管理
+    Gui, 2:Show, w300 h440, 範本管理
 return
 
-; --- 子視窗：範本即時字數統計 & 高度自適應調整 ---
+; --- 子視窗：範本即時字數統計 ---
 CountTmplChars:
     Gui, 2:Submit, NoHide
     
@@ -224,39 +214,6 @@ CountTmplChars:
         GuiControl, 2:+cRed, TmplCharCount
     else
         GuiControl, 2:+cGreen, TmplCharCount
-        
-    ; 2. 計算行數並自適應調整子視窗高度
-    StrReplace(TmplContent, "`n", "`n", LineCount)
-    LineCount += 1
-    
-    TargetH := LineCount * 18 + 15
-    if (TargetH < MGR_MSG_MinH)
-        TargetH := MGR_MSG_MinH
-    if (TargetH > MGR_MSG_MaxH)
-        TargetH := MGR_MSG_MaxH
-        
-    if (TargetH != Current_MGR_MSG_H) {
-        Delta := TargetH - Current_MGR_MSG_H
-        Current_MGR_MSG_H := TargetH
-        
-        ; 調整編輯框高度
-        GuiControl, 2:Move, TmplContent, h%TargetH%
-        
-        ; 移動下方控制項
-        ControlGetPos, CX, CY, CW, CH,, ahk_id %HwndMgrCharCount%
-        GuiControl, 2:Move, %HwndMgrCharCount%, % "y" (CY + Delta)
-        
-        ControlGetPos, SX, SY, SW, SH,, ahk_id %HwndMgrSaveBtn%
-        GuiControl, 2:Move, %HwndMgrSaveBtn%, % "y" (SY + Delta)
-        
-        ControlGetPos, DX, DY, DW, DH,, ahk_id %HwndMgrDelBtn%
-        GuiControl, 2:Move, %HwndMgrDelBtn%, % "y" (DY + Delta)
-        
-        ; 動態調整子視窗高度
-        WinGetPos, WX, WY, WW, WH, 範本管理
-        NewWinH := WH + Delta
-        WinMove, 範本管理,,,, %NewWinH%
-    }
 return
 
 ; --- 子視窗：從清單載入範本進行修改 ---
@@ -388,10 +345,17 @@ SendSMS:
         }
     }
     
-    ; 產生與格式化 Log 記錄 (新增「失敗原因」分類，並將回應置於最末尾)
-    LogEntry := Format("[{1}] 電話: {2} | 內容: {3} | 狀態: {4} | 失敗原因: {5} | 預約時間: {6} | 回應: {7}`n"
-        , CurrentTime, DEST, MSG, Status, ErrorReason, (ST_Val != "" ? ST_Val : "即時發送"), Result)
-    FileAppend, %LogEntry%, %LogFile%
+    ; --- 寫入 LOG 檔 (優化：多組號碼自動解析為多行獨立日誌) ---
+    Loop, Parse, DEST, `,
+    {
+        TargetPhone := Trim(A_LoopField)
+        if (TargetPhone = "")
+            continue
+            
+        LogEntry := Format("[{1}] 電話: {2} | 內容: {3} | 狀態: {4} | 原因: {5} | 預約時間: {6} | 回應: {7}`n"
+            , CurrentTime, TargetPhone, MSG, Status, ErrorReason, (ST_Val != "" ? ST_Val : "即時發送"), Result)
+        FileAppend, %LogEntry%, %LogFile%
+    }
     
     ; 發送結果提示與欄位重置
     if (Status = "成功") {
