@@ -55,38 +55,59 @@ Gui, 1:New, +HwndHwndGui1
 Gui, 1:Default
 Gui, 1:Font, s10, Microsoft JhengHei
 
-; 頂部：手機號碼標題與查詢餘額按鈕
-Gui, 1:Add, Text, x20 y20 w210, 📱 手機號碼 (多組請以逗號隔開):
-Gui, 1:Add, Button, gCheckCredit x240 y16 w100 h24, 💰 查詢餘額
-Gui, 1:Add, Edit, vDEST x20 y45 w320 h28, 0900000000
+; 頂部：手機號碼標題與查詢餘額按鈕 (配合加寬調整座標)
+Gui, 1:Add, Text, x20 y20 w240, 📱 手機號碼 (多組請以逗號隔開):
+Gui, 1:Add, Button, gCheckCredit x270 y16 w110 h24, 💰 查詢餘額
+Gui, 1:Add, Edit, vDEST x20 y45 w360 h28, 0900000000
 
-; 預約發送設定區
+; =========================================
+; 預約發送設定區 (加寬版下拉選單)
+; =========================================
+; 預先產生時與分的下拉選單資料 (自動預設為現在時間)
+HourList := ""
+Loop, 24 {
+    h := Format("{:02}", A_Index - 1)
+    HourList .= h . (h == A_Hour ? "||" : "|")
+}
+MinList := ""
+Loop, 60 {
+    m := Format("{:02}", A_Index - 1)
+    MinList .= m . (m == A_Min ? "||" : "|")
+}
+
 Gui, 1:Add, CheckBox, vUseSched gToggleSched x20 y+15 h20, 📅 啟用預約發送
-Gui, 1:Add, DateTime, vSchedTime w180 h28 x160 yp-4 Disabled Choose%A_Now%, yyyy-MM-dd HH:mm:ss
+; 移除 DropDownList 的 h28，改用 r12 與 r15 控制一次展開顯示的列數，方便快速選取
+Gui, 1:Add, DateTime, vSchedDate w115 h28 x140 yp-4 Disabled Choose%A_Now%, yyyy-MM-dd
+Gui, 1:Add, DropDownList, vSchedHour w55 r12 x+8 yp Disabled, %HourList%
+Gui, 1:Add, Text, x+4 yp+4, :
+Gui, 1:Add, DropDownList, vSchedMin w55 r15 x+4 yp-4 Disabled, %MinList%
+; =========================================
 
-Gui, 1:Add, Text, x20 y+15 w320, 💬 簡訊內容:
+Gui, 1:Add, Text, x20 y+15 w360, 💬 簡訊內容:
 ; 綁定 gCountChars 進行字數統計與高度自適應
-Gui, 1:Add, Edit, vMSG x20 y144 w320 h100 gCountChars +Multi +WantReturn
+Gui, 1:Add, Edit, vMSG x20 y144 w360 h100 gCountChars +Multi +WantReturn
 
 ; 下方控制項 (綁定 HWND 供動態排版使用)
-Gui, 1:Add, Text, x20 vCharCount cGreen w320 y252 hwndHwndCharCount, 字數: 0
-Gui, 1:Add, Text, x20 y276 w320 hwndHwndTplLabel, 快速選取範本:
-Gui, 1:Add, DropDownList, vTemplateList w210 gApplyTemplate x20 y299 hwndHwndTplList, % GetTemplates()
+Gui, 1:Add, Text, x20 vCharCount cGreen w360 y252 hwndHwndCharCount, 字數: 0
+Gui, 1:Add, Text, x20 y276 w360 hwndHwndTplLabel, 快速選取範本:
+Gui, 1:Add, DropDownList, vTemplateList w250 gApplyTemplate x20 y299 hwndHwndTplList, % GetTemplates()
 Gui, 1:Add, Button, gOpenTemplateManager w100 h28 x+10 yp-1 hwndHwndMgrBtn, ⚙ 管理範本
 
 Gui, 1:Font, s11 Bold, Microsoft JhengHei
-Gui, 1:Add, Button, gSendSMS w320 h50 x20 y339 hwndHwndSendBtn, ✉ 發送簡訊
+Gui, 1:Add, Button, gSendSMS w360 h50 x20 y339 hwndHwndSendBtn, ✉ 發送簡訊
 Gui, 1:Font
 
-; 底部按鈕區 (恢復滿版關閉按鈕)
+; 底部按鈕區 (新增檢視紀錄按鈕)
 Gui, 1:Font, s10, Microsoft JhengHei
-Gui, 1:Add, Button, gCloseApp w320 h35 x20 y399 hwndHwndCloseBtn, ❌ 關閉視窗
+Gui, 1:Add, Button, gOpenLog w175 h35 x20 y399 hwndHwndLogBtn, 📜 檢視紀錄
+Gui, 1:Add, Button, gCloseApp w175 h35 x205 y399 hwndHwndCloseBtn, ❌ 關閉視窗
 
-; 隱蔽的重置帳密功能 (位於右下角的灰色小字體)
+; 隱蔽的重置帳密功能 (定位於加寬後視窗的右下角)
 Gui, 1:Font, s8, Microsoft JhengHei
-Gui, 1:Add, Text, gResetAuth x290 y439 cGray hwndHwndResetBtn, [重置帳密]
+Gui, 1:Add, Text, gResetAuth x330 y439 cGray hwndHwndResetBtn, [重置帳密]
 
-Gui, 1:Show, w360, 發簡訊v5
+; 視窗總寬度加寬至 400px (提供兩側各20px的舒適邊距)
+Gui, 1:Show, w400, 發簡訊 v5.1
 return
 
 ; --- UI 事件：查詢 API 點數餘額 ---
@@ -129,10 +150,15 @@ return
 ; --- UI 事件：切換預約發送 ---
 ToggleSched:
     Gui, 1:Submit, NoHide
-    if (UseSched)
-        GuiControl, 1:Enable, SchedTime
-    else
-        GuiControl, 1:Disable, SchedTime
+    if (UseSched) {
+        GuiControl, 1:Enable, SchedDate
+        GuiControl, 1:Enable, SchedHour
+        GuiControl, 1:Enable, SchedMin
+    } else {
+        GuiControl, 1:Disable, SchedDate
+        GuiControl, 1:Disable, SchedHour
+        GuiControl, 1:Disable, SchedMin
+    }
 return
 
 ; --- 核心邏輯：讀取範本清單 ---
@@ -209,23 +235,24 @@ CountChars:
         GuiControl, 1:Move, MSG, h%TargetH%
         
         ; 重新計算並移動下方所有控制項的 Y 軸位置
-        NewY_CharCount := 144 + TargetH + 8
-        NewY_TplLabel  := 144 + TargetH + 32
-        NewY_TplList   := 144 + TargetH + 55
-        NewY_MgrBtn    := 144 + TargetH + 55
-        NewY_SendBtn   := 144 + TargetH + 95
-        NewY_CloseBtn  := 144 + TargetH + 155
-        NewY_ResetBtn  := 144 + TargetH + 195  ; 隱蔽按鈕的 Y 軸 (緊隨關閉按鈕下)
+        NewY_CharCount  := 144 + TargetH + 8
+        NewY_TplLabel   := 144 + TargetH + 32
+        NewY_TplList    := 144 + TargetH + 55
+        NewY_MgrBtn     := 144 + TargetH + 55
+        NewY_SendBtn    := 144 + TargetH + 95
+        NewY_BottomBtns := 144 + TargetH + 155  ; 包含 Log 鈕與關閉鈕
+        NewY_ResetBtn   := 144 + TargetH + 195  
         
         GuiControl, 1:Move, %HwndCharCount%, y%NewY_CharCount%
         GuiControl, 1:Move, %HwndTplLabel%, y%NewY_TplLabel%
         GuiControl, 1:Move, %HwndTplList%, y%NewY_TplList%
         GuiControl, 1:Move, %HwndMgrBtn%, y%NewY_MgrBtn%
         GuiControl, 1:Move, %HwndSendBtn%, y%NewY_SendBtn%
-        GuiControl, 1:Move, %HwndCloseBtn%, y%NewY_CloseBtn%
+        GuiControl, 1:Move, %HwndLogBtn%, y%NewY_BottomBtns%
+        GuiControl, 1:Move, %HwndCloseBtn%, y%NewY_BottomBtns%
         GuiControl, 1:Move, %HwndResetBtn%, y%NewY_ResetBtn%
         
-        ; 調整主視窗總高度 (多預留一點空間給底部的文字)
+        ; 調整主視窗總高度
         NewWinH := 144 + TargetH + 195 + 25 + 45
         WinMove, ahk_id %HwndGui1%,,,,, %NewWinH%
     }
@@ -244,7 +271,7 @@ ApplyTemplate:
 return
 
 
-; --- 建立子視窗：範本管理模組 (Gui 2) ---
+; --- 建立子視窗：範本管理模組 (Gui 2) 視窗加寬 ---
 Global HwndGui2           ; 子視窗控制代碼
 
 OpenTemplateManager:
@@ -253,20 +280,20 @@ OpenTemplateManager:
     Gui, 2:Default
     Gui, 2:Font, s10, Microsoft JhengHei
     
-    Gui, 2:Add, Text, x20 y20 w260, 📁 現有範本列表 (點選載入修改):
-    Gui, 2:Add, ListBox, vTmplListBox x20 y45 w260 r5 gLoadSelectedTmpl, % GetTemplates()
+    Gui, 2:Add, Text, x20 y20 w300, 📁 現有範本列表 (點選載入修改):
+    Gui, 2:Add, ListBox, vTmplListBox x20 y45 w300 r5 gLoadSelectedTmpl, % GetTemplates()
     
-    Gui, 2:Add, Text, x20 y155 w260, 📝 範本名稱:
-    Gui, 2:Add, Edit, vTmplName x20 y180 w260 h28
+    Gui, 2:Add, Text, x20 y155 w300, 📝 範本名稱:
+    Gui, 2:Add, Edit, vTmplName x20 y180 w300 h28
     
-    Gui, 2:Add, Text, x20 y220 w260, 💬 範本內容:
-    Gui, 2:Add, Edit, vTmplContent x20 y245 w260 h100 gCountTmplChars +Multi +WantReturn +VScroll
+    Gui, 2:Add, Text, x20 y220 w300, 💬 範本內容:
+    Gui, 2:Add, Edit, vTmplContent x20 y245 w300 h100 gCountTmplChars +Multi +WantReturn +VScroll
     
-    Gui, 2:Add, Text, x20 vTmplCharCount cGreen w260 y355, 字數: 0
-    Gui, 2:Add, Button, gSaveTmpl w120 h35 x20 y385, 💾 新增 / 儲存
-    Gui, 2:Add, Button, gDeleteTmpl x160 y385 w120 h35, 🗑 刪除選擇
+    Gui, 2:Add, Text, x20 vTmplCharCount cGreen w300 y355, 字數: 0
+    Gui, 2:Add, Button, gSaveTmpl w140 h35 x20 y385, 💾 新增 / 儲存
+    Gui, 2:Add, Button, gDeleteTmpl x180 y385 w140 h35, 🗑 刪除選擇
     
-    Gui, 2:Show, w300 h440, 範本管理
+    Gui, 2:Show, w340 h440, 範本管理
 return
 
 ; --- 範本管理事件：即時字數統計 ---
@@ -334,7 +361,86 @@ DeleteTmpl:
     MsgBox, 64, 成功, 範本已成功刪除！
 return
 
+; =========================================
+; --- 建立子視窗：發送紀錄查詢模組 (Gui 3) ---
+; =========================================
+Global HwndGui3
+
+OpenLog:
+    if (!FileExist(LogFile)) {
+        MsgBox, 64, 提示, 目前尚未產生任何發送紀錄喔！
+        return
+    }
+    
+    Gui, 3:Destroy ; 防止重複建立視窗
+    Gui, 3:New, +HwndHwndGui3
+    Gui, 3:Default
+    Gui, 3:Font, s10, Microsoft JhengHei
+    
+    ; 頂部搜尋區塊
+    Gui, 3:Add, Text, x20 y20 w400, 🔍 搜尋 (可輸入電話、批次號碼、狀態或內容):
+    Gui, 3:Add, Edit, vSearchKeyword x20 y45 w440 h28
+    Gui, 3:Add, Button, gLoadLogData Default x470 y44 w110 h30, 篩選紀錄
+    Gui, 3:Add, Button, gClearLogSearch x590 y44 w90 h30, 顯示全部
+    
+    ; 建立表格 (ListView)
+    Gui, 3:Add, ListView, vLogLV x20 y85 w760 h300 Grid, 發送時間|手機號碼|狀態|批次號碼|簡訊內容|原因
+    LV_ModifyCol(1, 150) ; 時間
+    LV_ModifyCol(2, 110) ; 電話
+    LV_ModifyCol(3, 60)  ; 狀態
+    LV_ModifyCol(4, 90)  ; 批次
+    LV_ModifyCol(5, 180) ; 內容
+    LV_ModifyCol(6, 150) ; 原因
+    
+    Gui, 3:Show, w800 h410, 📜 發送紀錄查詢
+    
+    ; 視窗開啟時自動載入所有資料
+    Gosub, LoadLogData
+return
+
+; 清除搜尋條件並重新載入
+ClearLogSearch:
+    GuiControl, 3:, SearchKeyword, 
+    Gosub, LoadLogData
+return
+
+; 讀取 Log 檔並過濾載入 ListView
+LoadLogData:
+    Gui, 3:Submit, NoHide
+    Gui, 3:Default
+    LV_Delete() ; 清空現有表格資料
+    
+    FileRead, FullLog, %LogFile%
+    Loop, Parse, FullLog, `n, `r
+    {
+        if (A_LoopField = "")
+            continue
+            
+        ; 若有輸入關鍵字，且該行找不到該關鍵字則跳過
+        if (SearchKeyword != "" && !InStr(A_LoopField, SearchKeyword))
+            continue
+            
+        ; 使用正則表達式精準萃取各個欄位
+        RegExMatch(A_LoopField, "\[(.*?)\]", mTime)
+        RegExMatch(A_LoopField, "電話:\s(.*?)\s*\|", mPhone)
+        RegExMatch(A_LoopField, "狀態:\s(.*?)\s*\|", mStatus)
+        RegExMatch(A_LoopField, "批次號碼:\s(.*?)\s*\|", mBatch)
+        RegExMatch(A_LoopField, "內容:\s(.*?)\s*\|", mContent)
+        RegExMatch(A_LoopField, "原因:\s(.*?)\s*\|", mReason)
+        
+        ; 將萃取出的資料填入表格中
+        LV_Add("", mTime1, mPhone1, mStatus1, mBatch1, mContent1, mReason1)
+    }
+    
+    ; 將表格自動捲動到最底部 (顯示最新紀錄)
+    LV_Modify(LV_GetCount(), "Vis")
+return
+
 ; --- 關閉與重置事件處理 ---
+3GuiClose:
+    Gui, 3:Destroy
+return
+
 2GuiClose:
     Gui, 2:Destroy ; 僅銷毀子視窗
 return
@@ -376,7 +482,9 @@ SendSMS:
     ; 決定是否帶入預約時間
     ST_Val := ""
     if (UseSched) {
-        ST_Val := SchedTime  ; AHK 原生格式: yyyyMMddHHmmss
+        ; AHK的 SchedDate 會原生回傳 YYYYMMDDHHMISS 格式，我們只取前8碼(年月日)
+        ; 接著拼接自訂下拉選單的 SchedHour (時) 與 SchedMin (分)，最後補上 00 (秒)
+        ST_Val := SubStr(SchedDate, 1, 8) . SchedHour . SchedMin . "00"
     }
     
     ; 確保內文及特殊字元正確傳遞 (避免 URL 截斷)
@@ -416,7 +524,14 @@ SendSMS:
         if (SubStr(FirstField, 1, 1) != "-" && Res0 >= 5) {
             Status := "成功"
             BatchID := Trim(Res5)  ; 擷取第5個欄位的 BatchID
-            ErrorReason := (ST_Val != "") ? "預約發送設定成功" : "發送成功"
+            
+            ; 若有啟用預約，則顯示設定的年月日時分給使用者看
+            if (ST_Val != "") {
+                FriendlyTime := SubStr(ST_Val, 1, 4) . "-" . SubStr(ST_Val, 5, 2) . "-" . SubStr(ST_Val, 7, 2) . " " . SubStr(ST_Val, 9, 2) . ":" . SubStr(ST_Val, 11, 2)
+                ErrorReason := "預約發送設定成功 (" . FriendlyTime . ")"
+            } else {
+                ErrorReason := "發送成功"
+            }
         } else {
             Status := "失敗"
             ErrorReason := GetErrorReason(FirstField)
@@ -430,6 +545,10 @@ SendSMS:
     }
     
     ; --- 紀錄 Log 檔 (支援多組號碼分列紀錄，並新增 BatchID 欄位) ---
+    ; 將簡訊內容的換行替換為空白，確保 Log 保持嚴謹的單行格式，以利後續的表格分析與讀取搜尋
+    CleanLogMSG := StrReplace(MSG, "`n", " ")
+    CleanLogMSG := StrReplace(CleanLogMSG, "`r", "")
+    
     Loop, Parse, DEST, `,
     {
         TargetPhone := Trim(A_LoopField)
@@ -437,14 +556,14 @@ SendSMS:
             continue
             
         LogEntry := Format("[{1}] 電話: {2} | 內容: {3} | 狀態: {4} | 批次號碼: {5} | 原因: {6} | 預約時間: {7} | 回應: {8}`n"
-            , CurrentTime, TargetPhone, MSG, Status, (BatchID != "" ? BatchID : "無"), ErrorReason, (ST_Val != "" ? ST_Val : "即時發送"), Result)
+            , CurrentTime, TargetPhone, CleanLogMSG, Status, (BatchID != "" ? BatchID : "無"), ErrorReason, (ST_Val != "" ? ST_Val : "即時發送"), Result)
         FileAppend, %LogEntry%, %LogFile%
     }
     
     ; --- 處理發送後 UI 狀態 ---
     if (Status = "成功") {
         if (ST_Val != "")
-            MsgBox, 64, 成功, 簡訊預約成功！`n`n預約送出時間: %ST_Val%`n批次號碼: %BatchID%
+            MsgBox, 64, 成功, 簡訊預約成功！`n`n預約送出時間: %FriendlyTime%`n批次號碼: %BatchID%
         else
             MsgBox, 64, 成功, 簡訊發送成功！`n`n批次號碼: %BatchID%
             
