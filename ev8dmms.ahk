@@ -5,11 +5,12 @@ SetWorkingDir %A_ScriptDir%
 ; ==============================================================================
 ; 程式名稱：EVERY8D 簡訊發送工具
 ; 程式功能：發送簡訊、預約發送、管理範本、檢視本地發送紀錄、查詢送達狀態、
-;           發送前確認、API 錯誤碼中文對照、過濾 24 小時內重複發送。
+;           發送前確認、API 錯誤碼中文對照、過濾重複發送、攜帶式範本儲存、
+;           多門號獨立存檔紀錄、帳密加密存檔、取消預約簡訊。
 ; ==============================================================================
 
 Global RegPath := "HKCU\Software\Every8DSMSTool"
-Global TmplRegPath := "HKCU\Software\Every8DSMSTool\Templates"
+Global TmplFile := "templates.ini" 
 Global LogFile := "sms_log.txt"
 Global Templates := {}
 
@@ -19,10 +20,25 @@ Global Templates := {}
 InitAuth:
 GoSub, LoadTemplates
 
-RegRead, SavedUID, %RegPath%, UID
-RegRead, SavedPWD, %RegPath%, PWD
-SavedUID := Trim(SavedUID)
-SavedPWD := Trim(SavedPWD)
+; 讀取加密過的帳密
+RegRead, SavedEncUID, %RegPath%, EncUID
+RegRead, SavedEncPWD, %RegPath%, EncPWD
+SavedUID := SimpleDecrypt(SavedEncUID)
+SavedPWD := SimpleDecrypt(SavedEncPWD)
+
+; 無痛遷移機制：如果發現舊版明碼帳密，自動升級成加密版並刪除舊機碼
+if (SavedUID = "" || SavedPWD = "") {
+    RegRead, OldUID, %RegPath%, UID
+    RegRead, OldPWD, %RegPath%, PWD
+    if (OldUID != "" && OldPWD != "") {
+        SavedUID := Trim(OldUID)
+        SavedPWD := Trim(OldPWD)
+        RegDelete, %RegPath%, UID
+        RegDelete, %RegPath%, PWD
+        RegWrite, REG_SZ, %RegPath%, EncUID, % SimpleEncrypt(SavedUID)
+        RegWrite, REG_SZ, %RegPath%, EncPWD, % SimpleEncrypt(SavedPWD)
+    }
+}
 
 if (SavedUID = "" || SavedPWD = "") {
     InputBox, SavedUID, 初始帳號設定, 請輸入您的 EVERY8D 帳號 (UID):,, 280, 130
@@ -33,12 +49,13 @@ if (SavedUID = "" || SavedPWD = "") {
     if (ErrorLevel || SavedPWD = "")
         ExitApp 
     
-    RegWrite, REG_SZ, %RegPath%, UID, %SavedUID%
-    RegWrite, REG_SZ, %RegPath%, PWD, %SavedPWD%
+    ; 寫入時進行加密
+    RegWrite, REG_SZ, %RegPath%, EncUID, % SimpleEncrypt(SavedUID)
+    RegWrite, REG_SZ, %RegPath%, EncPWD, % SimpleEncrypt(SavedPWD)
 }
 
 FutureTime := A_Now
-EnvAdd, FutureTime, 10, Minutes
+EnvAdd, FutureTime, 30, Minutes 
 FormatTime, DefDate, %FutureTime%, yyyyMMdd
 FormatTime, DefHour, %FutureTime%, HH 
 FormatTime, DefMin, %FutureTime%, mm  
@@ -67,7 +84,7 @@ Gui, 1:Add, Button, x240 y32 w95 h30 gCheckCredit, 💰 查詢餘額
 Gui, 1:Add, Button, x345 y32 w110 h30 gResetAuth, 🔑 重置帳密
 
 Gui, 1:Add, Text, x15 y95, 📱 手機號碼 (多筆請用半形逗號隔開)：
-Gui, 1:Add, Edit, x15 y115 w450 vDEST, 0900000000
+Gui, 1:Add, Edit, x15 y115 w450 vDEST, 
 
 Gui, 1:Add, Checkbox, x15 y152 w135 vUseSched gToggleSched, ⏰ 啟用預約發送
 Gui, 1:Add, DateTime, x150 y149 w120 vSchedDate Disabled Choose%DefDate%, yyyy/MM/dd
@@ -91,7 +108,6 @@ Gui, 1:Add, Text, x15 y295, 💬 簡訊內容：
 Gui, 1:Add, Edit, x15 y315 w450 h110 vMSG gUpdateCharCount, 
 Gui, 1:Add, Text, x15 y435 w450 vCharCountText c0x007ACC, 字數：0 字 (共 0 封簡訊)
 
-; C 功能：過濾重複發送選項
 Gui, 1:Add, Checkbox, x15 y460 w300 vFilterDuplicate Checked, 🛡️ 過濾 24 小時內相同門號重複發送的訊息
 
 Gui, 1:Add, Button, x15 y490 w215 h40 vSendBtn Default gConfirmSendSMS, 🚀 發送簡訊
@@ -106,11 +122,18 @@ return
 ; ==============================================================================
 LoadTemplates:
 Templates := {} 
-Loop, Reg, %TmplRegPath%, V
-{
-    RegRead, tmplContent
-    if (!ErrorLevel)
-        Templates[A_LoopRegName] := tmplContent
+IniRead, allTmpls, %TmplFile%, Templates
+if (allTmpls != "" && allTmpls != "ERROR") {
+    Loop, Parse, allTmpls, `n, `r
+    {
+        pos := InStr(A_LoopField, "=")
+        if (pos) {
+            tTitle := SubStr(A_LoopField, 1, pos-1)
+            tContent := SubStr(A_LoopField, pos+1)
+            tContent := StrReplace(tContent, "{NEWLINE}", "`n")
+            Templates[tTitle] := tContent
+        }
+    }
 }
 return
 
@@ -186,13 +209,15 @@ Gui, 2:Add, Text, x15 y200, 範本名稱：
 Gui, 2:Add, Edit, x90 y198 w375 vEditTmplTitle, 
 
 Gui, 2:Add, Text, x15 y235, 範本內容：
-Gui, 2:Add, Edit, x90 y232 w375 h60 vEditTmplContent, 
+Gui, 2:Add, Edit, x90 y232 w375 h60 vEditTmplContent gUpdateTmplCharCount, 
 
-Gui, 2:Add, Button, x15 y305 w215 h32 gSaveTmpl, 💾 新增 / 更新
-Gui, 2:Add, Button, x250 y305 w215 h32 gDeleteTmpl, ❌ 刪除所選
+Gui, 2:Add, Text, x90 y295 w375 vTmplCharCountText c0x007ACC, 字數：0 字
+
+Gui, 2:Add, Button, x15 y320 w215 h32 gSaveTmpl, 💾 新增 / 更新
+Gui, 2:Add, Button, x250 y320 w215 h32 gDeleteTmpl, ❌ 刪除所選
 
 GoSub, LoadTmplToLV
-Gui, 2:Show, w480 h355, ⚙️ 簡訊範本管理
+Gui, 2:Show, w480 h370, ⚙️ 簡訊範本管理
 return
 
 LoadTmplToLV:
@@ -209,7 +234,14 @@ if (A_GuiEvent = "I" && InStr(ErrorLevel, "S", true)) {
     LV_GetText(selContent, A_EventInfo, 2)
     GuiControl, 2:, EditTmplTitle, %selTitle%
     GuiControl, 2:, EditTmplContent, %selContent%
+    GoSub, UpdateTmplCharCount
 }
+return
+
+UpdateTmplCharCount:
+Gui, 2:Submit, NoHide
+len := StrLen(EditTmplContent)
+GuiControl, 2:, TmplCharCountText, % "字數：" . len . " 字"
 return
 
 SaveTmpl:
@@ -218,10 +250,23 @@ if (EditTmplTitle = "" || EditTmplContent = "") {
     MsgBox, 48, 提示, 範本名稱與內容皆不可為空！
     return
 }
+if (InStr(EditTmplTitle, "=")) {
+    MsgBox, 48, 提示, 範本名稱不可包含等號 (=)，請修改名稱！
+    return
+}
+
 Templates[EditTmplTitle] := EditTmplContent
-RegWrite, REG_SZ, %TmplRegPath%, %EditTmplTitle%, %EditTmplContent%
+encodedContent := StrReplace(EditTmplContent, "`n", "{NEWLINE}")
+encodedContent := StrReplace(encodedContent, "`r", "")
+IniWrite, %encodedContent%, %TmplFile%, Templates, %EditTmplTitle%
+
 GoSub, LoadTmplToLV  
 GoSub, RefreshTmplDDL 
+
+GuiControl, 2:, EditTmplTitle, 
+GuiControl, 2:, EditTmplContent, 
+GoSub, UpdateTmplCharCount
+
 MsgBox, 64, 成功, 範本已成功儲存！
 return
 
@@ -237,9 +282,12 @@ MsgBox, 52, 刪除確認, 確定要刪除範本「%delTitle%」嗎？
 IfMsgBox, Yes
 {
     Templates.Delete(delTitle)
-    RegDelete, %TmplRegPath%, %delTitle%
+    IniDelete, %TmplFile%, Templates, %delTitle%
+    
     GuiControl, 2:, EditTmplTitle,  
     GuiControl, 2:, EditTmplContent, 
+    GoSub, UpdateTmplCharCount
+    
     GoSub, LoadTmplToLV
     GoSub, RefreshTmplDDL
     MsgBox, 64, 完成, 已成功刪除該範本！
@@ -276,7 +324,6 @@ if (RegExMatch(res, "^-?\d+(\.\d+)?$")) {
 }
 return
 
-; 發送前確認邏輯
 ConfirmSendSMS:
 Gui, 1:Submit, NoHide
 if (DEST = "" || MSG = "") {
@@ -284,7 +331,6 @@ if (DEST = "" || MSG = "") {
     return
 }
 
-; 計算預計發送對象數量
 StringSplit, DestArr, DEST, `,
 DestCount := 0
 Loop, %DestArr0% {
@@ -292,7 +338,6 @@ Loop, %DestArr0% {
         DestCount++
 }
 
-; 計算每則簡訊預計點數 (簡單估算，實際以電信商回傳為主)
 len := StrLen(MSG)
 costPerMsg := (len <= 70) ? 1 : Ceil(len / 67)
 totalCost := DestCount * costPerMsg
@@ -309,7 +354,6 @@ IfMsgBox, Yes
 return
 
 SendSMS:
-; 根據是否勾選過濾重複，決定使用的 API 端點
 if (FilterDuplicate)
     URL := "https://new.e8d.tw/API21/HTTP/SendSMS4FilterMessage.ashx"
 else
@@ -329,7 +373,6 @@ FormatTime, CurrentTime,, yyyy/MM/dd HH:mm:ss
 CleanMSG := StrReplace(MSG, "`n", " ")
 CleanMSG := StrReplace(CleanMSG, "`r", "")
 
-; 解析回傳值 (成功：credit,sended,cost,unsend,batch_id,重複發送門號,重複批次碼)
 if (ResArr1 != "" && ResArr1 >= 0 && ResArr2 != "") {
     BatchID := (ResArr5 != "") ? ResArr5 : "N/A"
     Cost := (ResArr3 != "") ? ResArr3 : "0"
@@ -337,16 +380,39 @@ if (ResArr1 != "" && ResArr1 >= 0 && ResArr2 != "") {
     
     SuccessMsg := "簡訊發送請求處理完成！`n批次號碼：" . BatchID . "`n實際發送：" . ResArr2 . " 筆`n扣除點數：" . Cost . " 點`n剩餘點數：" . ResArr1 . " 點"
     
-    ; 如果啟用了過濾，且有被過濾掉的門號，提示使用者
+    FilteredList := ""
     if (FilterDuplicate && ResArr0 >= 6 && ResArr6 != "") {
+        FilteredList := ResArr6
         SuccessMsg .= "`n`n⚠️ 以下門號因為 24 小時內已發送過相同內容，已被系統自動攔截過濾：`n" . ResArr6
-        StatusStr .= " (含攔截)"
     }
     
     MsgBox, 64, 處理結果, %SuccessMsg%
-    LogEntry := CurrentTime . "|" . StatusStr . "|" . BatchID . "|" . DEST . "|" . CleanMSG . "|" . Cost . "|-"
+    
+    PerMsgCost := (ResArr2 > 0) ? Round(Cost / ResArr2, 2) : 0
+    StringSplit, DestArr, DEST, `,
+    Loop, %DestArr0% {
+        thisDest := Trim(DestArr%A_Index%)
+        if (thisDest == "")
+            continue
+            
+        thisStatus := StatusStr
+        thisCost := PerMsgCost
+        
+        if (FilteredList != "" && InStr("/" . FilteredList . "/", "/" . thisDest . "/")) {
+            thisStatus := "攔截(重複)"
+            thisCost := 0
+        }
+        
+        LogEntry := CurrentTime . "|" . thisStatus . "|" . BatchID . "|" . thisDest . "|" . CleanMSG . "|" . thisCost . "|-"
+        FileAppend, %LogEntry%`n, %LogFile%, UTF-8
+    }
+    
+    GuiControl, 1:, DEST, 
+    GuiControl, 1:, MSG, 
+    GuiControl, 1:Choose, TmplSelect, 1
+    GoSub, UpdateCharCount
+    
 } else {
-    ; 處理失敗狀況
     errText := ""
     errCode := res
     if (ResArr0 >= 2) {
@@ -357,24 +423,31 @@ if (ResArr1 != "" && ResArr1 >= 0 && ResArr2 != "") {
     }
     
     MsgBox, 16, 發送失敗, 錯誤代碼：%errCode%`n%errText%
-    LogEntry := CurrentTime . "|發送失敗|N/A|" . DEST . "|" . CleanMSG . "|0|" . errCode
+    
+    StringSplit, DestArr, DEST, `,
+    Loop, %DestArr0% {
+        thisDest := Trim(DestArr%A_Index%)
+        if (thisDest == "")
+            continue
+        LogEntry := CurrentTime . "|發送失敗|N/A|" . thisDest . "|" . CleanMSG . "|0|" . errCode
+        FileAppend, %LogEntry%`n, %LogFile%, UTF-8
+    }
 }
 
-FileAppend, %LogEntry%`n, %LogFile%, UTF-8
 return
 
 ResetAuth:
-MsgBox, 52, 重置確認, 確定要清除儲存在登錄檔中的帳密嗎？`n清除後程式將自動重新啟動。
+MsgBox, 52, 重置確認, 確定要清除儲存在加密登錄檔中的帳密嗎？`n清除後程式將自動重新啟動。
 IfMsgBox, Yes
 {
-    RegDelete, %RegPath%, UID
-    RegDelete, %RegPath%, PWD
+    RegDelete, %RegPath%, EncUID
+    RegDelete, %RegPath%, EncPWD
     Reload 
 }
 return
 
 ; ==============================================================================
-; 紀錄查詢子視窗 (GUI 3) - 欄位重構並相容舊版紀錄
+; 紀錄查詢子視窗 (GUI 3)
 ; ==============================================================================
 ShowLogWindow:
 Gui, 3:Destroy
@@ -382,11 +455,11 @@ Gui, 3:Default
 Gui, 3:Font, s10, Microsoft JhengHei
 
 Gui, 3:Add, Text, x15 y15, 🔍 關鍵字搜尋：
-Gui, 3:Add, Edit, x110 y12 w350 vFilterKeyword gFilterLogs, 
-Gui, 3:Add, Button, x470 y10 w120 h30 gFilterLogs, 篩選紀錄
-Gui, 3:Add, Button, x600 y10 w180 h30 gCheckDelivery, 📡 查詢電信送達狀態
+Gui, 3:Add, Edit, x110 y12 w230 vFilterKeyword gFilterLogs, 
+Gui, 3:Add, Button, x350 y10 w90 h30 gFilterLogs, 篩選紀錄
+Gui, 3:Add, Button, x450 y10 w160 h30 gCheckDelivery, 📡 查詢電信送達狀態
+Gui, 3:Add, Button, x620 y10 w160 h30 gCancelSchedule, 🚫 取消預約簡訊
 
-; 根據指定順序建構表頭
 Gui, 3:Add, ListView, x15 y50 w770 h380 vLogLV Grid, 日期時間|狀態|批次|手機號碼|簡訊內容|扣點數|失敗原因
 LV_ModifyCol(1, 140) 
 LV_ModifyCol(2, 90)  
@@ -413,26 +486,21 @@ if (FileExist(LogFile)) {
         fTime := Trim(Field1)
         fStatus := Trim(Field2)
         
-        ; 為了讓以前存的紀錄不會因為欄位對調而亂掉，自動判斷是舊版還是新版
         if (Field0 == 6) { 
-            ; 最早期的 6 欄版本 (時間|狀態|號碼|內容|批次|原因)
             fBatchID := Trim(Field5)
             fDest := Trim(Field3)
             fMsg := Trim(Field4)
             fCost := "-"
             fReason := Trim(Field6)
         } else {           
-            ; 判斷第 3 欄位是不是純數字或+號開頭(代表是舊版的手機號碼)
             testField3 := Trim(Field3)
             if (RegExMatch(testField3, "^[\d\+]+$")) {
-                ; 舊版 7 欄位 (時間|狀態|號碼|內容|批次|點數|原因)
                 fBatchID := Trim(Field5)
                 fDest := Trim(Field3)
                 fMsg := Trim(Field4)
                 fCost := Trim(Field6)
                 fReason := Trim(Field7)
             } else {
-                ; 全新重構 7 欄位 (時間|狀態|批次|號碼|內容|點數|原因)
                 fBatchID := Trim(Field3)
                 fDest := Trim(Field4)
                 fMsg := Trim(Field5)
@@ -446,14 +514,12 @@ if (FileExist(LogFile)) {
                 continue
         }
         
-        ; 如果有錯誤碼，把它翻譯出來顯示
         if (fReason != "-" && fReason != "N/A" && fReason != "") {
             transReason := TranslateErrorCode(fReason)
             if (transReason != "未知錯誤碼")
                 fReason := fReason . " (" . transReason . ")"
         }
         
-        ; 按照新的指定順序加入 ListView
         LV_Add("", fTime, fStatus, fBatchID, fDest, fMsg, fCost, fReason)
     }
 }
@@ -471,7 +537,6 @@ if (!Row) {
     MsgBox, 48, 提示, 請先點擊選擇一筆紀錄！
     return
 }
-; 批次碼現在是第 3 欄，手機號碼是第 4 欄
 LV_GetText(selBatchID, Row, 3) 
 LV_GetText(selDest, Row, 4)    
 if (selBatchID = "N/A" || selBatchID = "") {
@@ -498,6 +563,59 @@ if (Lines1 == "0" || Lines0 < 2) {
 }
 return
 
+CancelSchedule:
+Gui, 3:Default
+Row := LV_GetNext(0, "Focused") 
+if (!Row) {
+    MsgBox, 48, 提示, 請先點擊選擇一筆「預約成功」的紀錄！
+    return
+}
+LV_GetText(selBatchID, Row, 3) 
+LV_GetText(selStatus, Row, 2)
+
+if (selBatchID = "N/A" || selBatchID = "") {
+    MsgBox, 48, 提示, 該筆紀錄沒有批次號碼，無法取消！
+    return
+}
+if (!InStr(selStatus, "預約")) {
+    MsgBox, 48, 提示, 只能取消狀態為「預約成功」的簡訊！
+    return
+}
+
+MsgBox, 52, 取消確認, 確定要取消批次號碼 [%selBatchID%] 的預約簡訊嗎？
+IfMsgBox, Yes
+{
+    URL := "https://new.e8d.tw/API21/HTTP/EraseBooking.ashx"
+    PostData := "UID=" . URIEncode(SavedUID) . "&PWD=" . URIEncode(SavedPWD) . "&BID=" . URIEncode(selBatchID)
+    res := HTTPPost(URL, PostData)
+
+    StringSplit, ResArr, res, `,
+    if (ResArr1 != "" && ResArr1 >= 0) {
+        MsgBox, 64, 取消成功, 成功取消預約！`n刪除筆數：%ResArr1%`n回補點數：%ResArr2%
+        
+        LV_Modify(Row, "Col2", "預約已取消") 
+        
+        tempFile := LogFile . ".tmp"
+        FileDelete, %tempFile%
+        Loop, Read, %LogFile%, %tempFile%
+        {
+            if (InStr(A_LoopReadLine, selBatchID) && InStr(A_LoopReadLine, "預約成功")) {
+                newLine := StrReplace(A_LoopReadLine, "|預約成功|", "|預約已取消|")
+                FileAppend, %newLine%`n
+            } else {
+                FileAppend, %A_LoopReadLine%`n
+            }
+        }
+        FileMove, %tempFile%, %LogFile%, 1 
+    } else {
+        errText := TranslateErrorCode(ResArr1)
+        if (ResArr2 != "")
+            errText := ResArr2 . " (" . errText . ")"
+        MsgBox, 16, 取消失敗, 錯誤代碼：%ResArr1%`n原因：%errText%
+    }
+}
+return
+
 3GuiClose:
 Gui, 3:Destroy
 return
@@ -507,7 +625,7 @@ GuiClose:
 ExitApp
 
 ; ==============================================================================
-; 共用核心工具函式：HTTP 請求與網址安全編碼
+; 共用核心工具函式
 ; ==============================================================================
 HTTPPost(url, postData) {
     whr := ComObjCreate("WinHttp.WinHttpRequest.5.1")
@@ -531,27 +649,71 @@ URIEncode(str) {
     return char
 }
 
-; ==============================================================================
-; 錯誤碼翻譯函式 (依據 API 2.1 規格書附件一)
-; ==============================================================================
+SimpleEncrypt(str) {
+    hexStr := ""
+    Loop, Parse, str
+    {
+        charCode := Asc(A_LoopField) ^ 0x5AA5
+        hexStr .= Format("{:04X}", charCode)
+    }
+    return hexStr
+}
+
+SimpleDecrypt(hexStr) {
+    str := ""
+    Loop, % StrLen(hexStr) / 4
+    {
+        hex := "0x" . SubStr(hexStr, A_Index * 4 - 3, 4)
+        str .= Chr(hex ^ 0x5AA5)
+    }
+    return str
+}
+
+; ===== 完整對照官方規格表更新錯誤代碼 =====
 TranslateErrorCode(code) {
     code := Trim(code)
-    if (code == "-10")
-        return "受話方手機系統不支援 MMS"
-    else if (code == "-8")
-        return "受話方手機號碼格式不符"
+    if (code == "-1")
+        return "參數錯誤"
+    else if (code == "-2")
+        return "帳號或密碼錯誤"
+    else if (code == "-3")
+        return "手機號碼為互動黑名單"
+    else if (code == "-4")
+        return "預計發送時間逾期"
     else if (code == "-5")
         return "內容長度超過限制"
-    else if (code == "-4")
-        return "預計發送時間已逾期 24 小時以上"
-    else if (code == "-3")
-        return "受話方手機號碼為互動黑名單"
-    else if (code == "-2")
-        return "API 帳號或密碼錯誤"
-    else if (code == "-1")
-        return "參數錯誤"
+    else if (code == "-6")
+        return "預約發送時間格式錯誤"
+    else if (code == "-7")
+        return "發送名單檔案過大"
+    else if (code == "-8")
+        return "手機號碼格式不符"
+    else if (code == "-9")
+        return "查無此批次發送紀錄"
+    else if (code == "-10")
+        return "手機系統不支援 MMS"
+    else if (code == "-11")
+        return "尚未開通 API 發送權限"
+    else if (code == "-12")
+        return "尚未開通國際簡訊權限"
+    else if (code == "-13")
+        return "尚未開通點數轉發權限"
+    else if (code == "-14")
+        return "尚未開通 MMS 發送權限"
+    else if (code == "-15")
+        return "主旨長度超過限制"
+    else if (code == "-16")
+        return "發送限制阻擋"
+    else if (code == "-20")
+        return "預約時間需大於現在時間 10 分鐘"
+    else if (code == "-21")
+        return "無效的簡訊批次號碼"
+    else if (code == "-24")
+        return "預約時間不可大於現在時間 6 個月"
+    else if (code == "-99")
+        return "伺服器發生不明錯誤"
     else if (code == "0")
-        return "訊息已成功送達電信端，等待手機收訊中"
+        return "已送達電信端，等待手機收訊"
     else if (code == "100")
         return "已成功送達手機"
     else if (code == "101")
@@ -563,9 +725,11 @@ TranslateErrorCode(code) {
     else if (code == "104")
         return "門號為電信端之黑名單"
     else if (code == "105")
-        return "因訊息內文含有敏感關鍵字進行阻擋 (電信端回覆)"
+        return "內文含敏感關鍵字 (電信端阻擋)"
     else if (code == "106")
-        return "因訊息內文含有敏感關鍵字進行阻擋 (系統判斷)"
+        return "內文含敏感關鍵字 (系統阻擋)"
+    else if (code == "107")
+        return "系統發送逾時"
     else if (code == "300")
         return "預約簡訊，系統尚未發送"
     else if (code == "301")
@@ -573,11 +737,13 @@ TranslateErrorCode(code) {
     else if (code == "303")
         return "取消預約"
     else if (code == "500")
-        return "該門號為國際門號，請至帳號設定開啟國際簡訊發送功能"
+        return "國際門號未開通功能"
     else if (code == "700")
         return "已傳送"
     else if (code == "999")
         return "回覆簡訊"
+    else if (code == "-666")
+        return "未在官方規格內的例外錯誤"
     else
         return "未知錯誤碼"
 }
