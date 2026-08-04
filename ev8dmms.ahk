@@ -86,7 +86,7 @@ Gui, 1:Add, Button, gCloseApp w320 h35 x20 y399 hwndHwndCloseBtn, ❌ 關閉視�
 Gui, 1:Font, s8, Microsoft JhengHei
 Gui, 1:Add, Text, gResetAuth x290 y439 cGray hwndHwndResetBtn, [重置帳密]
 
-Gui, 1:Show, w360, 發簡訊 v1 (安全儲存版)
+Gui, 1:Show, w360, 發簡訊v5
 return
 
 ; --- UI 事件：查詢 API 點數餘額 ---
@@ -358,10 +358,20 @@ GuiClose:
 SendSMS:
     Gui, 1:Submit, NoHide
     
-    if (DEST = "" || MSG = "") {
-        MsgBox, 48, 提示, 請輸入手機號碼與簡訊內容！
+    ; [防呆功能] 自動過濾：移除非數字與非逗號的字元 (例如空白、連字號等)
+    CleanDEST := RegExReplace(DEST, "[^\d,]")
+    
+    ; [防呆功能] 去除頭尾可能因為誤刪造成多餘的逗號
+    CleanDEST := RegExReplace(CleanDEST, "^,+|,+$")
+    
+    if (CleanDEST = "" || MSG = "") {
+        MsgBox, 48, 提示, 請輸入有效的手機號碼與簡訊內容！
         return
     }
+    
+    ; 更新介面顯示過濾後的號碼，並將參數替換為乾淨的版本
+    GuiControl, 1:, DEST, %CleanDEST%
+    DEST := CleanDEST
     
     ; 決定是否帶入預約時間
     ST_Val := ""
@@ -393,6 +403,7 @@ SendSMS:
     FormatTime, CurrentTime,, yyyy-MM-dd HH:mm:ss
     Status := "失敗"
     ErrorReason := "無"
+    BatchID := ""
     
     if (!IsNetworkSuccess) {
         Status := "失敗"
@@ -404,6 +415,7 @@ SendSMS:
         ; 成功條件：首欄非負號，且回傳欄位數量大於等於 5 (標準規格)
         if (SubStr(FirstField, 1, 1) != "-" && Res0 >= 5) {
             Status := "成功"
+            BatchID := Trim(Res5)  ; 擷取第5個欄位的 BatchID
             ErrorReason := (ST_Val != "") ? "預約發送設定成功" : "發送成功"
         } else {
             Status := "失敗"
@@ -417,24 +429,25 @@ SendSMS:
         }
     }
     
-    ; --- 紀錄 Log 檔 (支援多組號碼分列紀錄) ---
+    ; --- 紀錄 Log 檔 (支援多組號碼分列紀錄，並新增 BatchID 欄位) ---
     Loop, Parse, DEST, `,
     {
         TargetPhone := Trim(A_LoopField)
         if (TargetPhone = "")
             continue
             
-        LogEntry := Format("[{1}] 電話: {2} | 內容: {3} | 狀態: {4} | 原因: {5} | 預約時間: {6} | 回應: {7}`n"
-            , CurrentTime, TargetPhone, MSG, Status, ErrorReason, (ST_Val != "" ? ST_Val : "即時發送"), Result)
+        LogEntry := Format("[{1}] 電話: {2} | 內容: {3} | 狀態: {4} | 批次號碼: {5} | 原因: {6} | 預約時間: {7} | 回應: {8}`n"
+            , CurrentTime, TargetPhone, MSG, Status, (BatchID != "" ? BatchID : "無"), ErrorReason, (ST_Val != "" ? ST_Val : "即時發送"), Result)
         FileAppend, %LogEntry%, %LogFile%
     }
     
     ; --- 處理發送後 UI 狀態 ---
     if (Status = "成功") {
         if (ST_Val != "")
-            MsgBox, 64, 成功, 簡訊預約成功！`n預約送出時間: %ST_Val%
+            MsgBox, 64, 成功, 簡訊預約成功！`n`n預約送出時間: %ST_Val%`n批次號碼: %BatchID%
         else
-            MsgBox, 64, 成功, 簡訊發送成功！
+            MsgBox, 64, 成功, 簡訊發送成功！`n`n批次號碼: %BatchID%
+            
         GuiControl, 1:, DEST,  ; 成功後清空號碼欄位以防誤傳，保留內文
     } else {
         MsgBox, 48, 失敗, 簡訊發送失敗。`n`n狀態: %Status%`n失敗原因: %ErrorReason%`n回應內容: %Result%
