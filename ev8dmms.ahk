@@ -55,8 +55,10 @@ Gui, 1:New, +HwndHwndGui1
 Gui, 1:Default
 Gui, 1:Font, s10, Microsoft JhengHei
 
-Gui, 1:Add, Text, x20 y20 w320, 📱 手機號碼 (多組號碼以半形逗號隔開):
-Gui, 1:Add, Edit, vDEST w320 h28, 0900000000
+; 頂部：手機號碼標題與查詢餘額按鈕
+Gui, 1:Add, Text, x20 y20 w210, 📱 手機號碼 (多組請以逗號隔開):
+Gui, 1:Add, Button, gCheckCredit x240 y16 w100 h24, 💰 查詢餘額
+Gui, 1:Add, Edit, vDEST x20 y45 w320 h28, 0900000000
 
 ; 預約發送設定區
 Gui, 1:Add, CheckBox, vUseSched gToggleSched x20 y+15 h20, 📅 啟用預約發送
@@ -84,7 +86,44 @@ Gui, 1:Add, Button, gCloseApp w320 h35 x20 y399 hwndHwndCloseBtn, ❌ 關閉視�
 Gui, 1:Font, s8, Microsoft JhengHei
 Gui, 1:Add, Text, gResetAuth x290 y439 cGray hwndHwndResetBtn, [重置帳密]
 
-Gui, 1:Show, w360, 發簡訊v3
+Gui, 1:Show, w360, 發簡訊 v1 (安全儲存版)
+return
+
+; --- UI 事件：查詢 API 點數餘額 ---
+CheckCredit:
+    URL := "https://new.e8d.tw/API21/HTTP/GetCredit.ashx"
+    PostData := "UID=" . SavedUID . "&PWD=" . SavedPWD
+    
+    whr := ComObjCreate("WinHttp.WinHttpRequest.5.1")
+    whr.Open("POST", URL, true)
+    whr.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded")
+    
+    try {
+        whr.Send(PostData)
+        whr.WaitForResponse()
+        Result := Trim(whr.ResponseText)
+        
+        ; 判斷是否為負數錯誤碼
+        if (SubStr(Result, 1, 1) = "-") {
+            Reason := GetErrorReason(Result)
+            MsgBox, 48, 餘額查詢失敗, 查詢失敗！`n`n錯誤碼：%Result%`n原因：%Reason%
+            
+            ; 若因帳密錯誤導致查詢失敗，一樣主動提示重置
+            if (Result = "-2") {
+                MsgBox, 52, 帳密錯誤, 系統偵測到您的 API 帳號或密碼發生錯誤。`n請問是否要清除記錄並重新設定？
+                IfMsgBox, Yes
+                {
+                    FileSetAttrib, -H, %IniFile%
+                    FileDelete, %IniFile%
+                    Reload
+                }
+            }
+        } else {
+            MsgBox, 64, 帳戶餘額, 🟢 您目前的帳戶餘額為：`n`n%Result% 點
+        }
+    } catch e {
+        MsgBox, 16, 錯誤, 連線至 API 失敗，請檢查網路連線。
+    }
 return
 
 ; --- UI 事件：切換預約發送 ---
