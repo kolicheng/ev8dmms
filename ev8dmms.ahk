@@ -6,7 +6,7 @@ FileEncoding, UTF-8  ; 強制全域預設為 UTF-8，避免讀取日誌時變為
 ; ==============================================================================
 ; 程式名稱：EVERY8D 簡訊發送工具
 ; 程式功能：發送簡訊、動態彈窗預約發送、管理範本、檢視本地發送紀錄、查詢送達狀態、
-;           嚴格格式防呆、API 錯誤碼中文對照、過濾重複發送、攜帶式範本儲存、
+;           嚴格格式與長度防呆、常駐過濾重複發送、攜帶式範本儲存、
 ;           多門號獨立存檔紀錄、帳密加密存檔、取消預約簡訊。
 ; ==============================================================================
 
@@ -16,25 +16,23 @@ Global LogFile := "sms_log.txt"
 Global Templates := {}
 Global FinalST := "" 
 Global UseSched := false
+Global FilterDuplicate := true ; 常駐開啟過濾重複功能
 
 ; ==============================================================================
 ; 1. 初始化：載入範本、帳號認證
 ; ==============================================================================
 InitAuth:
-; 確保範本設定檔具備 UTF-16 BOM，防止 IniWrite 寫入中文時變為 ANSI 亂碼
 if (!FileExist(TmplFile)) {
     FileAppend, % Chr(0xFEFF), %TmplFile%, UTF-16
 }
 
 GoSub, LoadTemplates
 
-; 讀取加密過的帳密
 RegRead, SavedEncUID, %RegPath%, EncUID
 RegRead, SavedEncPWD, %RegPath%, EncPWD
 SavedUID := SimpleDecrypt(SavedEncUID)
 SavedPWD := SimpleDecrypt(SavedEncPWD)
 
-; 無痛遷移機制：如果發現舊版明碼帳密，自動升級成加密版並刪除舊機碼
 if (SavedUID = "" || SavedPWD = "") {
     RegRead, OldUID, %RegPath%, UID
     RegRead, OldPWD, %RegPath%, PWD
@@ -57,13 +55,12 @@ if (SavedUID = "" || SavedPWD = "") {
     if (ErrorLevel || SavedPWD = "")
         ExitApp 
     
-    ; 寫入時進行加密
     RegWrite, REG_SZ, %RegPath%, EncUID, % SimpleEncrypt(SavedUID)
     RegWrite, REG_SZ, %RegPath%, EncPWD, % SimpleEncrypt(SavedPWD)
 }
 
 ; ==============================================================================
-; 主介面 (GUI 1) 建構與排版 (移除預約欄位，讓主畫面更簡潔)
+; 主介面 (GUI 1) 建構與排版 (隱藏過濾選項，視窗更緊湊)
 ; ==============================================================================
 Gui, 1:Default
 Gui, 1:Font, s10, Microsoft JhengHei 
@@ -92,12 +89,11 @@ Gui, 1:Add, Text, x15 y260, 💬 簡訊內容：
 Gui, 1:Add, Edit, x15 y280 w450 h110 vMSG gUpdateCharCount, 
 Gui, 1:Add, Text, x15 y400 w450 vCharCountText c0x007ACC, 字數：0 字 (共 0 封簡訊)
 
-Gui, 1:Add, Checkbox, x15 y425 w300 vFilterDuplicate Checked, 🛡️ 過濾 24 小時內相同門號重複發送的訊息
+; 將發送按鈕往上移，補足原先 Checkbox 的空間
+Gui, 1:Add, Button, x15 y430 w215 h40 vSendBtn Default gConfirmSendSMS, 🚀 發送簡訊
+Gui, 1:Add, Button, x250 y430 w215 h40 gShowLogWindow, 📜 檢視紀錄
 
-Gui, 1:Add, Button, x15 y455 w215 h40 vSendBtn Default gConfirmSendSMS, 🚀 發送簡訊
-Gui, 1:Add, Button, x250 y455 w215 h40 gShowLogWindow, 📜 檢視紀錄
-
-Gui, 1:Show, w480 h515, EVERY8D簡訊發送工具
+Gui, 1:Show, w480 h490, EVERY8D簡訊發送工具
 GoSub, UpdateCharCount 
 return
 
@@ -299,22 +295,21 @@ if (DEST = "" || MSG = "") {
     return
 }
 
-; 嚴格檢查非法字元：只允許數字、半形逗號與加號
-if (RegExMatch(DEST, "[^\d\,\+]")) {
-    MsgBox, 48, 格式錯誤, 手機號碼包含無效字元！`n(僅允許輸入數字、加號與半形逗號，不可包含空白與文字)`n`n請修正後再發送。
-    return
-}
-
 StringSplit, DestArr, DEST, `,
 DestCount := 0
 Loop, %DestArr0% {
     thisNum := Trim(DestArr%A_Index%)
-    if (thisNum != "") {
-        DestCount++
-    } else {
+    if (thisNum == "") {
         MsgBox, 48, 格式錯誤, 偵測到無效的空號碼輸入！`n(請檢查是否有連續的逗號，或結尾多出逗號)`n`n請修正後再發送。
         return
     }
+    
+    ; 【修正重點】精準檢查長度與格式，阻擋如 "09" 這種未輸入完整的號碼
+    if (!RegExMatch(thisNum, "^\+?\d{8,15}$")) {
+        MsgBox, 48, 格式錯誤, 偵測到長度或格式異常的號碼：「%thisNum%」！`n台灣手機請輸入完整的 10 碼 (如 0912345678) 或正確的國際格式。`n`n請修正後再發送。
+        return
+    }
+    DestCount++
 }
 
 if (DestCount == 0) {
@@ -334,37 +329,40 @@ Gui, 4:Font, s10, Microsoft JhengHei
 Gui, 4:Add, Text, x15 y15 w280, 確定要發送這則簡訊嗎？
 Gui, 4:Add, Text, x15 y40 w280, 👥 發送對象：%DestCount% 組門號
 Gui, 4:Add, Text, x15 y65 w280, 💰 預估扣除：%totalCost% 點
-if (FilterDuplicate)
-    Gui, 4:Add, Text, x15 y90 w280 cRed, ⚠️ 已啟用「過濾 24 小時內重複訊息」
     
-Gui, 4:Add, GroupBox, x15 y120 w280 h75, ⏰ 發送時間 (不修改即為立即發送)
+Gui, 4:Add, GroupBox, x15 y100 w280 h75, ⏰ 發送時間 (不修改即為立即發送)
 
-; 動態抓取當下時間填入選項
-FormatTime, DefDate, %A_Now%, yyyyMMdd
-FormatTime, DefHour, %A_Now%, HH
-FormatTime, DefMin, %A_Now%, mm
+; 智慧預估 + 10 分鐘級距選單
+FutureTime := A_Now
+EnvAdd, FutureTime, 19, Minutes  ; 加上 19 分鐘，無條件捨去至十位數，保證大於現在時間 10~19 分鐘
+FormatTime, DefDate, %FutureTime%, yyyyMMdd
+FormatTime, DefHour, %FutureTime%, HH
+FormatTime, tempMin, %FutureTime%, mm
+DefMin := (tempMin // 10) * 10
+DefMinStr := Format("{:02d}", DefMin)
 
 HourOptions := ""
 Loop, 24 {
     h := Format("{:02d}", A_Index - 1)
     HourOptions .= h . (h == DefHour ? "||" : "|")
 }
+
 MinOptions := ""
-Loop, 60 {
-    m := Format("{:02d}", A_Index - 1)
-    MinOptions .= m . (m == DefMin ? "||" : "|")
+Loop, 6 {
+    m := Format("{:02d}", (A_Index - 1) * 10)
+    MinOptions .= m . (m == DefMinStr ? "||" : "|")
 }
 
-Gui, 4:Add, DateTime, x25 y150 w115 vSendDate Choose%DefDate%, yyyy/MM/dd
-Gui, 4:Add, DropDownList, x150 y150 w45 vSendHour r12, %HourOptions%
-Gui, 4:Add, Text, x200 y153, 時
-Gui, 4:Add, DropDownList, x220 y150 w45 vSendMin r12, %MinOptions%
-Gui, 4:Add, Text, x270 y153, 分
+Gui, 4:Add, DateTime, x25 y130 w115 vSendDate Choose%DefDate%, yyyy/MM/dd
+Gui, 4:Add, DropDownList, x150 y130 w45 vSendHour r12, %HourOptions%
+Gui, 4:Add, Text, x200 y133, 時
+Gui, 4:Add, DropDownList, x220 y130 w45 vSendMin r6, %MinOptions%
+Gui, 4:Add, Text, x270 y133, 分
 
-Gui, 4:Add, Button, x25 y210 w125 h35 gExecuteSend Default, ✅ 確認送出
-Gui, 4:Add, Button, x160 y210 w125 h35 g4GuiClose, ❌ 取消
+Gui, 4:Add, Button, x25 y190 w125 h35 gExecuteSend Default, ✅ 確認送出
+Gui, 4:Add, Button, x160 y190 w125 h35 g4GuiClose, ❌ 取消
 
-Gui, 4:Show, w310 h260, 發送前確認
+Gui, 4:Show, w310 h240, 發送前確認
 return
 
 4GuiClose:
@@ -379,11 +377,9 @@ Gui, 4:Submit, NoHide
 FormatTime, SelectedDateStr, %SendDate%, yyyyMMdd
 SelectedTimeFull := SelectedDateStr . SendHour . SendMin . "00"
 
-; 計算選擇時間與當下時間的差距 (分鐘)
 TimeDiff := SelectedTimeFull
 TimeDiff -= A_Now, Minutes
 
-; 智慧判定：小於等於現在時間視為「立即發送」，大於則為「預約發送」
 if (TimeDiff <= 0) {
     UseSched := false
     FinalST := ""
@@ -401,10 +397,8 @@ GoSub, SendSMS
 return
 
 SendSMS:
-if (FilterDuplicate)
-    URL := "https://new.e8d.tw/API21/HTTP/SendSMS4FilterMessage.ashx"
-else
-    URL := "https://new.e8d.tw/API21/HTTP/SendSMS.ashx"
+; 常駐過濾重複 API 介面
+URL := "https://new.e8d.tw/API21/HTTP/SendSMS4FilterMessage.ashx"
     
 PostData := "UID=" . URIEncode(SavedUID) . "&PWD=" . URIEncode(SavedPWD) . "&SB=" . URIEncode(SB) . "&DEST=" . URIEncode(DEST) . "&MSG=" . URIEncode(MSG)
 
@@ -424,14 +418,13 @@ if (ResArr1 != "" && ResArr1 >= 0 && ResArr2 != "") {
     StatusStr := UseSched ? "預約成功" : "發送成功"
     
     SuccessMsg := "簡訊發送請求處理完成！`n批次號碼：" . BatchID . "`n實際發送：" . ResArr2 . " 筆`n扣除點數：" . Cost . " 點`n剩餘點數：" . ResArr1 . " 點"
+    MsgBox, 64, 處理結果, %SuccessMsg%
     
     FilteredList := ""
-    if (FilterDuplicate && ResArr0 >= 6 && ResArr6 != "") {
+    if (ResArr0 >= 6 && ResArr6 != "") {
         FilteredList := ResArr6
-        SuccessMsg .= "`n`n⚠️ 以下門號因為 24 小時內已發送過相同內容，已被系統自動攔截過濾：`n" . ResArr6
+        MsgBox, 48, 重複發送攔截提示, ⚠️ 系統偵測到以下門號在 24 小時內已經發送過相同的簡訊，已自動為您攔截不扣點：`n`n%ResArr6%
     }
-    
-    MsgBox, 64, 處理結果, %SuccessMsg%
     
     PerMsgCost := (ResArr2 > 0) ? Round(Cost / ResArr2, 2) : 0
     StringSplit, DestArr, DEST, `,
