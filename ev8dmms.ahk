@@ -1,6 +1,7 @@
 ﻿#NoEnv
 #SingleInstance, Force
 SetWorkingDir %A_ScriptDir%
+FileEncoding, UTF-8  ; 【修正重點 1】強制全域預設為 UTF-8，避免讀取日誌時變為亂碼
 
 ; ==============================================================================
 ; 程式名稱：EVERY8D 簡訊發送工具
@@ -18,6 +19,11 @@ Global Templates := {}
 ; 1. 初始化：載入範本、帳號認證與預約時間預設值
 ; ==============================================================================
 InitAuth:
+; 【修正重點 2】確保範本設定檔具備 UTF-16 BOM，防止 IniWrite 寫入中文時變為 ANSI 亂碼
+if (!FileExist(TmplFile)) {
+    FileAppend, % Chr(0xFEFF), %TmplFile%, UTF-16
+}
+
 GoSub, LoadTemplates
 
 ; 讀取加密過的帳密
@@ -331,6 +337,43 @@ if (DEST = "" || MSG = "") {
     return
 }
 
+; 過濾多餘的逗號並重組乾淨的號碼字串
+StringSplit, DestArr, DEST, `,
+DestCount := 0
+CleanDest := ""
+
+Loop, %DestArr0% {
+    thisNum := Trim(DestArr%A_Index%)
+    if (thisNum != "") {
+        DestCount++
+        CleanDest .= (CleanDest = "" ? "" : ",") . thisNum
+    }
+}
+
+; 覆蓋為乾淨的字串，並同步更新回介面上
+DEST := CleanDest
+GuiControl, 1:, DEST, %DEST%
+
+if (DestCount == 0) {
+    MsgBox, 48, 提示, 請輸入有效的手機號碼！
+    return
+}
+
+len := StrLen(MSG)
+costPerMsg := (len <= 70) ? 1 : Ceil(len / 67)
+totalCost := DestCount * costPerMsg
+
+ConfirmMsg := "確定要發送這則簡訊嗎？`n`n發送對象：" . DestCount . " 組門號`n預估扣除：" . totalCost . " 點"
+if (FilterDuplicate)
+    ConfirmMsg .= "`n`n⚠️ 已啟用「過濾 24 小時內重複訊息」功能"
+    
+MsgBox, 52, 發送前確認, %ConfirmMsg%
+IfMsgBox, Yes
+{
+    GoSub, SendSMS
+}
+return
+
 StringSplit, DestArr, DEST, `,
 DestCount := 0
 Loop, %DestArr0% {
@@ -597,13 +640,15 @@ IfMsgBox, Yes
         
         tempFile := LogFile . ".tmp"
         FileDelete, %tempFile%
-        Loop, Read, %LogFile%, %tempFile%
+        
+        ; 【修正重點 3】明確指定迴圈讀寫皆以 UTF-8 寫入，避免 AHK 以 ANSI 覆寫導致 LOG 損毀
+        Loop, Read, %LogFile%
         {
             if (InStr(A_LoopReadLine, selBatchID) && InStr(A_LoopReadLine, "預約成功")) {
                 newLine := StrReplace(A_LoopReadLine, "|預約成功|", "|預約已取消|")
-                FileAppend, %newLine%`n
+                FileAppend, %newLine%`n, %tempFile%, UTF-8
             } else {
-                FileAppend, %A_LoopReadLine%`n
+                FileAppend, %A_LoopReadLine%`n, %tempFile%, UTF-8
             }
         }
         FileMove, %tempFile%, %LogFile%, 1 
@@ -631,8 +676,14 @@ HTTPPost(url, postData) {
     whr := ComObjCreate("WinHttp.WinHttpRequest.5.1")
     whr.Open("POST", url, false) 
     whr.SetRequestHeader("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-    whr.Send(postData)
-    return whr.ResponseText
+    
+    try {
+        whr.Send(postData)
+        return whr.ResponseText
+    } catch e {
+        ; 若無網路或伺服器無回應，攔截崩潰並回傳自訂錯誤碼
+        return "-999,連線失敗或伺服器無回應"
+    }
 }
 
 URIEncode(str) {
@@ -744,6 +795,8 @@ TranslateErrorCode(code) {
         return "回覆簡訊"
     else if (code == "-666")
         return "未在官方規格內的例外錯誤"
+	else if (code == "-999")
+		return "本地網路連線失敗，請檢查網路狀態"
     else
         return "未知錯誤碼"
 }
