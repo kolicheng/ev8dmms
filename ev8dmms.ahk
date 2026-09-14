@@ -17,6 +17,7 @@ Global Templates := {}
 Global FinalST := "" 
 Global UseSched := false
 Global FilterDuplicate := true ; 常駐開啟過濾重複功能
+Global OrigSelectedTime := ""  ; 用於記錄彈窗預設時間的快照
 
 ; ==============================================================================
 ; 1. 初始化：載入範本、帳號認證
@@ -304,7 +305,7 @@ Loop, %DestArr0% {
         return
     }
     
-    ; 【修正重點】精準檢查長度與格式，阻擋如 "09" 這種未輸入完整的號碼
+    ; 【防呆檢查】
     if (!RegExMatch(thisNum, "^\+?\d{8,15}$")) {
         MsgBox, 48, 格式錯誤, 偵測到長度或格式異常的號碼：「%thisNum%」！`n台灣手機請輸入完整的 10 碼 (如 0912345678) 或正確的國際格式。`n`n請修正後再發送。
         return
@@ -334,12 +335,15 @@ Gui, 4:Add, GroupBox, x15 y100 w280 h75, ⏰ 發送時間 (不修改即為立即
 
 ; 智慧預估 + 10 分鐘級距選單
 FutureTime := A_Now
-EnvAdd, FutureTime, 19, Minutes  ; 加上 19 分鐘，無條件捨去至十位數，保證大於現在時間 10~19 分鐘
+EnvAdd, FutureTime, 19, Minutes  
 FormatTime, DefDate, %FutureTime%, yyyyMMdd
 FormatTime, DefHour, %FutureTime%, HH
 FormatTime, tempMin, %FutureTime%, mm
 DefMin := (tempMin // 10) * 10
 DefMinStr := Format("{:02d}", DefMin)
+
+; 【關鍵修正】把設定好的預設時間字串存起來當作快照，用來判斷使用者有沒有修改
+OrigSelectedTime := DefDate . DefHour . DefMinStr . "00"
 
 HourOptions := ""
 Loop, 24 {
@@ -377,19 +381,27 @@ Gui, 4:Submit, NoHide
 FormatTime, SelectedDateStr, %SendDate%, yyyyMMdd
 SelectedTimeFull := SelectedDateStr . SendHour . SendMin . "00"
 
-TimeDiff := SelectedTimeFull
-TimeDiff -= A_Now, Minutes
-
-if (TimeDiff <= 0) {
+; 【關鍵修正】檢查使用者選出來的時間，是不是跟我們一開始存的快照一模一樣？
+if (SelectedTimeFull == OrigSelectedTime) {
+    ; 如果一模一樣，代表使用者沒有去動選單，走「立即發送」邏輯
     UseSched := false
     FinalST := ""
 } else {
-    if (TimeDiff < 10) {
-        MsgBox, 48, 提示, 依照 API 規則，預約時間必須大於現在時間 10 分鐘以上！`n若需立即發送，請保持預設的當下時間即可。
-        return
+    ; 如果不一樣，代表使用者有修改過，走「預約判定」邏輯
+    TimeDiff := SelectedTimeFull
+    TimeDiff -= A_Now, Minutes
+
+    if (TimeDiff <= 0) {
+        UseSched := false
+        FinalST := ""
+    } else {
+        if (TimeDiff < 10) {
+            MsgBox, 48, 提示, 依照 API 規則，預約時間必須大於現在時間 10 分鐘以上！`n若需立即發送，請不修改時間保持預設即可。
+            return
+        }
+        UseSched := true
+        FinalST := SelectedTimeFull
     }
-    UseSched := true
-    FinalST := SelectedTimeFull
 }
 
 Gui, 4:Destroy
