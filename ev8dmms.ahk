@@ -17,7 +17,7 @@ Global Templates := {}
 Global FinalST := "" 
 Global UseSched := false
 Global FilterDuplicate := true ; 常駐開啟過濾重複功能
-Global OrigSelectedTime := ""  ; 用於記錄彈窗預設時間的快照
+Global OrigSelectedTime := ""  ; 保留舊變數供相容，發送方式由選項明確決定
 
 ; ==============================================================================
 ; 1. 初始化：載入範本、帳號認證
@@ -331,7 +331,9 @@ Gui, 4:Add, Text, x15 y15 w280, 確定要發送這則簡訊嗎？
 Gui, 4:Add, Text, x15 y40 w280, 👥 發送對象：%DestCount% 組門號
 Gui, 4:Add, Text, x15 y65 w280, 💰 預估扣除：%totalCost% 點
     
-Gui, 4:Add, GroupBox, x15 y100 w280 h75, ⏰ 發送時間 (不修改即為立即發送)
+Gui, 4:Add, GroupBox, x15 y100 w280 h115, ⏰ 發送方式
+Gui, 4:Add, Radio, x25 y122 w250 vSendMode gUpdateSendMode Checked, 立即發送
+Gui, 4:Add, Radio, x25 y150 w250 gUpdateSendMode, 預約發送（至少 10 分鐘後）
 
 ; 智慧預估 + 10 分鐘級距選單
 FutureTime := A_Now
@@ -341,9 +343,6 @@ FormatTime, DefHour, %FutureTime%, HH
 FormatTime, tempMin, %FutureTime%, mm
 DefMin := (tempMin // 10) * 10
 DefMinStr := Format("{:02d}", DefMin)
-
-; 【關鍵修正】把設定好的預設時間字串存起來當作快照，用來判斷使用者有沒有修改
-OrigSelectedTime := DefDate . DefHour . DefMinStr . "00"
 
 HourOptions := ""
 Loop, 24 {
@@ -357,16 +356,32 @@ Loop, 6 {
     MinOptions .= m . (m == DefMinStr ? "||" : "|")
 }
 
-Gui, 4:Add, DateTime, x25 y130 w115 vSendDate Choose%DefDate%, yyyy/MM/dd
-Gui, 4:Add, DropDownList, x150 y130 w45 vSendHour r12, %HourOptions%
-Gui, 4:Add, Text, x200 y133, 時
-Gui, 4:Add, DropDownList, x220 y130 w45 vSendMin r6, %MinOptions%
-Gui, 4:Add, Text, x270 y133, 分
+Gui, 4:Add, DateTime, x25 y178 w115 vSendDate Choose%DefDate%, yyyy/MM/dd
+Gui, 4:Add, DropDownList, x150 y178 w45 vSendHour r12, %HourOptions%
+Gui, 4:Add, Text, x200 y181, 時
+Gui, 4:Add, DropDownList, x220 y178 w45 vSendMin r6, %MinOptions%
+Gui, 4:Add, Text, x270 y181, 分
 
-Gui, 4:Add, Button, x25 y190 w125 h35 gExecuteSend Default, ✅ 確認送出
-Gui, 4:Add, Button, x160 y190 w125 h35 g4GuiClose, ❌ 取消
+Gui, 4:Add, Button, x25 y230 w125 h35 vConfirmSendBtn gExecuteSend Default, ✅ 立即發送
+Gui, 4:Add, Button, x160 y230 w125 h35 g4GuiClose, ❌ 取消
 
-Gui, 4:Show, w310 h240, 發送前確認
+GoSub, UpdateSendMode
+Gui, 4:Show, w310 h280, 發送前確認
+return
+
+UpdateSendMode:
+Gui, 4:Submit, NoHide
+if (SendMode == 1) {
+    GuiControl, 4:Disable, SendDate
+    GuiControl, 4:Disable, SendHour
+    GuiControl, 4:Disable, SendMin
+    GuiControl, 4:, ConfirmSendBtn, ✅ 立即發送
+} else {
+    GuiControl, 4:Enable, SendDate
+    GuiControl, 4:Enable, SendHour
+    GuiControl, 4:Enable, SendMin
+    GuiControl, 4:, ConfirmSendBtn, ✅ 確認預約
+}
 return
 
 4GuiClose:
@@ -378,30 +393,41 @@ return
 ; ==============================================================================
 ExecuteSend:
 Gui, 4:Submit, NoHide
-FormatTime, SelectedDateStr, %SendDate%, yyyyMMdd
-SelectedTimeFull := SelectedDateStr . SendHour . SendMin . "00"
+UseSched := (SendMode == 2)
+FinalST := ""
 
-; 【關鍵修正】檢查使用者選出來的時間，是不是跟我們一開始存的快照一模一樣？
-if (SelectedTimeFull == OrigSelectedTime) {
-    ; 如果一模一樣，代表使用者沒有去動選單，走「立即發送」邏輯
-    UseSched := false
-    FinalST := ""
-} else {
-    ; 如果不一樣，代表使用者有修改過，走「預約判定」邏輯
-    TimeDiff := SelectedTimeFull
-    TimeDiff -= A_Now, Minutes
-
-    if (TimeDiff <= 0) {
-        UseSched := false
-        FinalST := ""
-    } else {
-        if (TimeDiff < 10) {
-            MsgBox, 48, 提示, 依照 API 規則，預約時間必須大於現在時間 10 分鐘以上！`n若需立即發送，請不修改時間保持預設即可。
-            return
-        }
-        UseSched := true
-        FinalST := SelectedTimeFull
+if (UseSched) {
+    FormatTime, SelectedDateStr, %SendDate%, yyyyMMdd
+    SelectedTimeFull := SelectedDateStr . SendHour . SendMin . "00"
+    SecondsUntilSend := SelectedTimeFull
+    SecondsUntilSend -= A_Now, Seconds
+    MaxYear := SubStr(A_Now, 1, 4) + 0
+    MaxMonth := SubStr(A_Now, 5, 2) + 6
+    if (MaxMonth > 12) {
+        MaxYear++
+        MaxMonth -= 12
     }
+    NextYear := MaxYear
+    NextMonth := MaxMonth + 1
+    if (NextMonth > 12) {
+        NextYear++
+        NextMonth := 1
+    }
+    FirstOfNextMonth := Format("{:04d}{:02d}01000000", NextYear, NextMonth)
+    EnvAdd, FirstOfNextMonth, -1, Days
+    LastDay := SubStr(FirstOfNextMonth, 7, 2) + 0
+    MaxDay := Min(SubStr(A_Now, 7, 2) + 0, LastDay)
+    MaxScheduleTime := Format("{:04d}{:02d}{:02d}", MaxYear, MaxMonth, MaxDay) . SubStr(A_Now, 9)
+
+    if (SecondsUntilSend < 600) {
+        MsgBox, 48, 預約時間無效, 預約時間須至少晚於現在 10 分鐘，請修改日期或時間。
+        return
+    }
+    if (SelectedTimeFull > MaxScheduleTime) {
+        MsgBox, 48, 預約時間無效, 預約時間不可超過現在 6 個月，請修改日期或時間。
+        return
+    }
+    FinalST := SelectedTimeFull
 }
 
 Gui, 4:Destroy
